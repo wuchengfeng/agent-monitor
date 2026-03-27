@@ -667,13 +667,14 @@
       const steps = Array.isArray(interactions) ? interactions : [];
       const max = isFullscreen ? 10 : 7;
       const view = steps.slice(0, max);
-      const listHtml = view.length ? view.map((i) => {
+      const sel = Math.min(Math.max(0, Number(selectedStepIndexBySession.get(key) || 0)), Math.max(0, view.length - 1));
+      const listHtml = view.length ? view.map((i, idx) => {
         let snippet = i.textPreview || i.content || '';
         if (typeof snippet !== 'string') snippet = JSON.stringify(snippet);
         snippet = snippet.replace(/\s+/g, ' ').trim();
         if (snippet.length > 80) snippet = snippet.slice(0, 80) + '…';
         return `
-          <div class="list-row">
+          <div class="list-row ${idx===sel?'selected':''}" onclick="selectStep('${key}', ${idx})">
             <div class="cell-time">${fmtTimeHms(i.ts)}</div>
             <div class="cell-type">${escHtml(i.type || '-')}</div>
             <div class="cell-tokens">-</div>
@@ -681,6 +682,29 @@
           </div>
         `;
       }).join('') : `<div class="mono" style="padding:10px">暂无步骤</div>`;
+
+      // Detail for selected step
+      const selectedStep = view[sel] || null;
+      let stepDetailHtml = '<div class="mono">暂无详情</div>';
+      if (selectedStep) {
+        const fullText = extractTextFromFullContent(selectedStep.fullContent) || selectedStep.textPreview || selectedStep.content || '';
+        const toolCalls = extractToolCallsFromFullContent(selectedStep.fullContent);
+        const textBlock = fullText
+          ? `<div class="detail-box" style="color:#e6eef8;max-height:220px;overflow:auto">${escHtml(fullText)}</div>`
+          : `<div class="detail-box" style="color:#5c6b7f;font-style:italic;max-height:220px;overflow:auto">无文本内容</div>`;
+        const toolBlock = toolCalls.length
+          ? toolCalls.map(tc => `<div class="detail-box" style="color:#e6eef8;max-height:220px;overflow:auto"><b>${escHtml(tc.name)}</b>\n${escHtml(tryPrettyJson(tc.arguments))}</div>`).join('')
+          : '';
+        stepDetailHtml = `
+          <div class="detail-title">
+            <span class="badge">${escHtml(selectedStep.type||'-')}</span>
+            <span class="ts">${fmtTs(selectedStep.ts)}</span>
+            ${selectedStep.resultToolName ? `<span class="badge">${escHtml(selectedStep.resultToolName)}</span>` : ''}
+          </div>
+          ${textBlock}
+          ${toolBlock}
+        `;
+      }
 
       const s = state.get(key) || {};
       const totalTokens = s.totalTokens || { input:0, output:0 };
@@ -740,7 +764,8 @@
             ${currentMsgBlock}
             ${err || ''}
             ${toolArgs || ''}
-            <div class="pane-list">${listHtml}</div>
+            <div class="pane-list" data-scroll-id="step-list-${key}">${listHtml}</div>
+            <div class="pane-detail" data-scroll-id="step-detail-${key}">${stepDetailHtml}</div>
           </div>
         </div>
       `;
@@ -837,8 +862,8 @@
             </div>
           </div>
           <div class="pane-main">
-            <div class="pane-list">${listHtml}</div>
-            <div class="pane-detail">${detailHtml}</div>
+            <div class="pane-list" data-scroll-id="api-list-${key}">${listHtml}</div>
+            <div class="pane-detail" data-scroll-id="api-detail-${key}">${detailHtml}</div>
           </div>
         </div>
       `;
@@ -846,9 +871,11 @@
     
     function render(){
       const grid=document.getElementById('grid');
-      // 只有在 grid 为空或者有结构变化时才完全重绘可能会更好，但这里简单起见全量重绘
-      // 为了防止输入状态丢失（虽然目前没有输入框），可以考虑优化
-      // 这里直接清空重绘
+      // Save scroll positions before wiping DOM
+      const scrollMap = new Map();
+      grid.querySelectorAll('[data-scroll-id]').forEach(el => {
+        scrollMap.set(el.dataset.scrollId, el.scrollTop);
+      });
       grid.innerHTML='';
       const btnToggle = document.getElementById('btn-toggle-archived');
       if(btnToggle) btnToggle.textContent = showArchived ? '隐藏归档' : `显示归档 (${archived.size})`;
@@ -941,6 +968,11 @@
         });
         block.appendChild(agentGrid);
         grid.appendChild(block);
+      });
+      // Restore scroll positions after rebuild
+      grid.querySelectorAll('[data-scroll-id]').forEach(el => {
+        const saved = scrollMap.get(el.dataset.scrollId);
+        if (saved !== undefined) el.scrollTop = saved;
       });
     }
     async function pollSnapshot(){
