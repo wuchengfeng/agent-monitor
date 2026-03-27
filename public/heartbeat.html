@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Heartbeat Scheduler</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b0f14;color:#e6eef8}
+    header{padding:12px 16px;background:#0e1621;border-bottom:1px solid #1c2834;display:flex;align-items:center;gap:16px}
+    h1{font-size:18px;margin:0}
+    a{color:#7aa2d5;text-decoration:none;font-size:14px}
+    a:hover{text-decoration:underline}
+    .container{max-width:800px;margin:24px auto;padding:0 16px}
+    .card{background:#111a24;border:1px solid #1c2834;border-radius:8px;padding:24px;margin-bottom:24px}
+    h2{font-size:16px;margin:0 0 16px 0;color:#cfe3ff}
+    .form-row{display:flex;gap:12px;align-items:flex-end;margin-bottom:16px}
+    .form-group{display:flex;flex-direction:column;gap:4px;flex:1}
+    label{font-size:12px;color:#a8b3bf}
+    input{background:#0e1621;border:1px solid #243444;color:#e6eef8;padding:8px;border-radius:4px;font-size:14px}
+    button{background:#2e7d32;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:14px;transition:opacity .2s}
+    button:hover{opacity:0.9}
+    button.danger{background:#5c2a2a;color:#ffb4b4}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th{text-align:left;padding:8px;border-bottom:1px solid #243444;color:#7aa2d5;font-weight:normal}
+    td{padding:8px;border-bottom:1px solid #1c2834;color:#e6eef8}
+    .status{margin-top:8px;font-size:14px;color:#a8b3bf}
+    .status span{color:#e6eef8;font-weight:600}
+    .note{font-size:12px;color:#6b7d8f;margin-top:12px;line-height:1.5}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Heartbeat Scheduler</h1>
+    <a href="/">← Back to Monitor</a>
+  </header>
+
+  <div class="container">
+    <div class="card">
+      <h2>当前状态</h2>
+      <div class="status">OpenClaw 当前心跳间隔: <span id="currentInterval">Loading...</span></div>
+      <div class="status">生效规则: <span id="activeRule">Checking...</span></div>
+    </div>
+
+    <div class="card">
+      <h2>添加规则</h2>
+      <div class="form-row">
+        <div class="form-group">
+          <label>开始时间 (HH:MM)</label>
+          <input type="time" id="startTime" required>
+        </div>
+        <div class="form-group">
+          <label>结束时间 (HH:MM)</label>
+          <input type="time" id="endTime" required>
+        </div>
+        <div class="form-group">
+          <label>心跳间隔 (e.g. 10m, 1h)</label>
+          <input type="text" id="interval" placeholder="10m" required>
+        </div>
+        <button onclick="addRule()">添加</button>
+      </div>
+      <div class="note">
+        注意：时间段不能重叠。如果不匹配任何规则，将使用默认间隔 (30m)。
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>规则列表</h2>
+      <table id="rulesTable">
+        <thead>
+          <tr>
+            <th>开始时间</th>
+            <th>结束时间</th>
+            <th>间隔</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- Rules will be populated here -->
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    let rules = [];
+
+    async function loadData() {
+      try {
+        const [scheduleRes, currentRes] = await Promise.all([
+          fetch('/api/heartbeat/schedule'),
+          fetch('/api/heartbeat/current')
+        ]);
+        
+        rules = await scheduleRes.json();
+        const current = await currentRes.json();
+        
+        document.getElementById('currentInterval').textContent = current.interval || 'Unknown';
+        renderRules();
+        updateActiveStatus();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function renderRules() {
+      const tbody = document.querySelector('#rulesTable tbody');
+      tbody.innerHTML = '';
+      
+      // Sort rules by start time
+      rules.sort((a, b) => a.start.localeCompare(b.start));
+
+      rules.forEach((rule, index) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${rule.start}</td>
+          <td>${rule.end}</td>
+          <td>${rule.interval}</td>
+          <td>
+            <button class="danger" onclick="deleteRule(${index})">删除</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function addRule() {
+      const start = document.getElementById('startTime').value;
+      const end = document.getElementById('endTime').value;
+      const interval = document.getElementById('interval').value;
+
+      if (!start || !end || !interval) {
+        alert('请填写所有字段');
+        return;
+      }
+
+      if (start >= end) {
+        alert('开始时间必须小于结束时间');
+        return;
+      }
+
+      // Simple overlap check
+      const conflict = rules.some(r => {
+        return (start < r.end && end > r.start);
+      });
+
+      if (conflict) {
+        alert('时间段与现有规则重叠');
+        return;
+      }
+
+      rules.push({ start, end, interval });
+      await saveRules();
+      document.getElementById('startTime').value = '';
+      document.getElementById('endTime').value = '';
+      document.getElementById('interval').value = '';
+    }
+
+    async function deleteRule(index) {
+      if (!confirm('确定删除此规则吗？')) return;
+      rules.splice(index, 1);
+      await saveRules();
+    }
+
+    async function saveRules() {
+      try {
+        await fetch('/api/heartbeat/schedule', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(rules)
+        });
+        await loadData(); // Reload to get updated status
+      } catch (e) {
+        alert('保存失败: ' + e.message);
+      }
+    }
+
+    function updateActiveStatus() {
+      const now = new Date();
+      const currentHm = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
+      
+      const active = rules.find(r => currentHm >= r.start && currentHm < r.end);
+      const el = document.getElementById('activeRule');
+      
+      if (active) {
+        el.textContent = `${active.start} - ${active.end} (${active.interval})`;
+        el.style.color = '#4caf50';
+      } else {
+        el.textContent = '默认 (30m)';
+        el.style.color = '#a8b3bf';
+      }
+    }
+
+    loadData();
+    setInterval(loadData, 10000); // Auto refresh status
+  </script>
+</body>
+</html>

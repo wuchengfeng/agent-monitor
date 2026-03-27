@@ -1,0 +1,7 @@
+{
+  "autoSoftDelete": {
+    "enabled": false,
+    "ttlMs": 7200000,
+    "intervalMs": 120000
+  }
+}

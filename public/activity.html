@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>OpenClaw Activity Timeline</title>
+  <style>
+    body { background: #0e1621; color: #cdd6e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+    header { background: #17212b; padding: 10px 20px; border-bottom: 1px solid #0e1621; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+    h1 { margin: 0; font-size: 16px; font-weight: 600; color: #fff; }
+    .controls { display: flex; gap: 10px; align-items: center; }
+    button { background: #2b5278; border: none; color: #fff; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    button:hover { background: #35638f; }
+    button.active { background: #5288c1; }
+    #timeline { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; scroll-behavior: smooth; }
+    
+    .event-card { background: #17212b; border-radius: 6px; padding: 12px; border-left: 4px solid #2b5278; max-width: 1200px; margin: 0 auto; width: 100%; box-sizing: border-box; }
+    .event-card.role-user { border-left-color: #4caf50; }
+    .event-card.role-assistant { border-left-color: #2b5278; }
+    .event-card.role-tool { border-left-color: #e91e63; }
+    .event-card.role-system { border-left-color: #9e9e9e; }
+    
+    .meta { display: flex; gap: 12px; font-size: 11px; color: #6c7883; margin-bottom: 8px; align-items: center; }
+    .tag { background: #242f3d; padding: 2px 6px; border-radius: 4px; color: #7aa2d5; font-family: monospace; }
+    .time { color: #828a95; }
+    .btn-copy { background: transparent; border: 1px solid #242f3d; color: #cdd6e0; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+    .btn-copy:hover { background: #242f3d; }
+    
+    .content { font-size: 13px; line-height: 1.5; word-break: break-word; }
+    .text-block { white-space: pre-wrap; margin-bottom: 8px; color: #dce3ea; }
+    
+    .tool-call { background: #0e1621; border: 1px solid #242f3d; border-radius: 4px; margin-top: 8px; overflow: hidden; }
+    .tool-header { background: #242f3d; padding: 4px 8px; font-size: 11px; color: #7aa2d5; font-weight: 600; display: flex; justify-content: space-between; }
+    .tool-body { padding: 8px; font-family: monospace; font-size: 12px; color: #a8b3bf; overflow-x: auto; white-space: pre-wrap; }
+    
+    .tool-result { margin-top: 8px; border-top: 1px solid #242f3d; padding-top: 8px; }
+    .result-label { font-size: 11px; color: #6c7883; margin-bottom: 4px; font-weight: 600; }
+    
+    .usage-stats { font-size: 10px; color: #536270; margin-top: 8px; text-align: right; }
+    
+    /* Syntax Highlighting (simple) */
+    .key { color: #c586c0; }
+    .string { color: #ce9178; }
+    .number { color: #b5cea8; }
+    .boolean { color: #569cd6; }
+    
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #0e1621; }
+    ::-webkit-scrollbar-thumb { background: #2b5278; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #35638f; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 id="title">OpenClaw Timeline</h1>
+    <div class="controls">
+      <button onclick="location.href='/'">返回看板</button>
+      <button id="btn-autoscroll" class="active" onclick="toggleAutoScroll()">自动滚动: ON</button>
+      <button onclick="clearTimeline()">清空</button>
+    </div>
+  </header>
+  <div id="timeline"></div>
+
+  <script>
+    const timeline = document.getElementById('timeline');
+    let autoScroll = true;
+    const processedIds = new Set();
+    const eventById = new Map();
+    const params = new URLSearchParams(location.search);
+    const sid = params.get('sid');
+    const agent = params.get('agent');
+    const titleEl = document.getElementById('title');
+    function displayAgentName(agentId){
+      if (agentId === 'main') return '南波万';
+      return agentId || 'unknown';
+    }
+    if (sid && agent) titleEl.textContent = `Agent ${displayAgentName(agent)} / Session ${sid}`;
+    if (sid && !agent) titleEl.textContent = `Session Timeline: ${sid}`;
+    if (!sid && agent) titleEl.textContent = `Agent Timeline: ${displayAgentName(agent)}`;
+    
+    function toggleAutoScroll() {
+      autoScroll = !autoScroll;
+      const btn = document.getElementById('btn-autoscroll');
+      btn.textContent = `自动滚动: ${autoScroll ? 'ON' : 'OFF'}`;
+      btn.className = autoScroll ? 'active' : '';
+    }
+    
+    function clearTimeline() {
+      timeline.innerHTML = '';
+      processedIds.clear();
+    }
+    
+    function fmtTs(ts) {
+      try {
+        const d = new Date(typeof ts === 'number' ? ts : Date.parse(ts));
+        return d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+      } catch { return String(ts); }
+    }
+    
+    function syntaxHighlight(json) {
+      if (typeof json !== 'string') json = JSON.stringify(json, null, 2);
+      json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+        var cls = 'number';
+        if (/^"/.test(match)) {
+          if (/:$/.test(match)) {
+            cls = 'key';
+          } else {
+            cls = 'string';
+          }
+        } else if (/true|false/.test(match)) {
+          cls = 'boolean';
+        } else if (/null/.test(match)) {
+          cls = 'null';
+        }
+        return '<span class="' + cls + '">' + match + '</span>';
+      });
+    }
+
+    async function writeClipboard(text) {
+      const payload = String(text == null ? '' : text);
+      if (!payload.trim()) return false;
+      try {
+        await navigator.clipboard.writeText(payload);
+        return true;
+      } catch {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = payload;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          ta.style.top = '0';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          return !!ok;
+        } catch {
+          return false;
+        }
+      }
+    }
+
+    function extractTextFromEvent(e) {
+      if (e && Array.isArray(e.fullContent)) {
+        const parts = e.fullContent
+          .filter((it) => it && it.type === 'text' && typeof it.text === 'string')
+          .map((it) => it.text.trim())
+          .filter(Boolean);
+        if (parts.length) return parts.join('\n');
+      }
+      return String(e && (e.textPreview || '') || '').trim();
+    }
+
+    function buildEventCopyText(e) {
+      const header = [
+        e.agentId ? `agentId: ${displayAgentName(e.agentId)}` : '',
+        e.sessionId ? `sessionId: ${e.sessionId}` : '',
+        e.ts ? `ts: ${fmtTs(e.ts)}` : '',
+        e.role ? `role: ${e.role}` : '',
+        e.model ? `model: ${e.model}` : '',
+        e.provider ? `provider: ${e.provider}` : '',
+      ].filter(Boolean).join('\n');
+
+      const text = extractTextFromEvent(e);
+      const toolCalls = (e && Array.isArray(e.fullContent))
+        ? e.fullContent.filter((it) => it && it.type === 'toolCall').map((it) => ({
+            id: it.id,
+            name: it.name,
+            arguments: it.arguments,
+          }))
+        : [];
+
+      const parts = [
+        header,
+        text ? `\n---\ntext:\n${text}` : '',
+        toolCalls.length ? `\n---\ntoolCalls:\n${JSON.stringify(toolCalls, null, 2)}` : '',
+        `\n---\nraw:\n${JSON.stringify(e, null, 2)}`,
+      ].filter(Boolean);
+
+      return parts.join('\n');
+    }
+
+    async function copyEvent(uid) {
+      const e = eventById.get(uid);
+      if (!e) return;
+      const ok = await writeClipboard(buildEventCopyText(e));
+      if (!ok) alert('复制失败：浏览器未授予剪贴板权限');
+    }
+
+    function renderEvent(e) {
+      if (agent && e.agentId && e.agentId !== agent) return;
+      if (sid && e.sessionId !== sid) return;
+      // 唯一键去重: msgId 优先，没有则用 sessionId+ts
+      const uid = e.msgId || ((e.agentId || 'main') + '-' + e.sessionId + '-' + e.ts);
+      if (processedIds.has(uid)) return;
+      processedIds.add(uid);
+      eventById.set(uid, e);
+      
+      const div = document.createElement('div');
+      
+      // Determine role class
+      let roleClass = 'role-system';
+      if (e.role === 'user') roleClass = 'role-user';
+      if (e.role === 'assistant') roleClass = 'role-assistant';
+      if (e.role === 'tool' || e.role === 'toolResult') roleClass = 'role-tool'; // Assuming tool results map to tool role
+      
+      div.className = `event-card ${roleClass}`;
+      
+      // Meta Header
+      let metaHtml = `
+        <div class="meta">
+          ${e.agentId ? `<span class="tag">${displayAgentName(e.agentId)}</span>` : ''}
+          <span class="tag">${String(e.sessionId || 'unknown').substring(0, 8)}</span>
+          <span class="time">${fmtTs(e.ts)}</span>
+          <span class="tag">${e.role || 'unknown'}</span>
+          ${e.model ? `<span class="tag" style="color:#ce9178">${e.model}</span>` : ''}
+          ${e.provider ? `<span class="tag">${e.provider}</span>` : ''}
+          <span style="flex:1"></span>
+          <button class="btn-copy" onclick="copyEvent('${uid.replace(/'/g, "\\'")}')">复制</button>
+        </div>
+      `;
+      
+      // Content Body
+      let contentHtml = '<div class="content">';
+      
+      // 1. Text Content
+      if (e.fullContent && Array.isArray(e.fullContent)) {
+        e.fullContent.forEach(item => {
+          if (item.type === 'text') {
+            contentHtml += `<div class="text-block">${item.text}</div>`;
+          } else if (item.type === 'toolCall') {
+            contentHtml += `
+              <div class="tool-call">
+                <div class="tool-header">
+                  <span>🛠 ${item.name}</span>
+                  <span>ID: ${item.id}</span>
+                </div>
+                <div class="tool-body">${syntaxHighlight(item.arguments)}</div>
+              </div>
+            `;
+          }
+        });
+      } else if (e.textPreview) {
+        // Fallback for older events or simple text
+        contentHtml += `<div class="text-block">${e.textPreview}</div>`;
+      }
+      
+      // 2. Tool Args (legacy or direct tool info)
+      if (e.toolName && !e.fullContent) {
+         contentHtml += `
+            <div class="tool-call">
+              <div class="tool-header">
+                <span>🛠 ${e.toolName}</span>
+              </div>
+              <div class="tool-body">${e.toolArgs}</div>
+            </div>
+         `;
+      }
+
+      // 3. Tool Result (implicit in role usually, but let's check textPreview or fullContent)
+      // If role is toolResult (usually user role in OpenAI API, but here we might distinguish)
+      // Current parser sets role from m.role.
+      
+      contentHtml += '</div>'; // End content
+      
+      // Usage Stats
+      if (e.usage) {
+        contentHtml += `
+          <div class="usage-stats">
+            In: ${e.usage.input} | Out: ${e.usage.output} | Total: ${e.usage.totalTokens}
+          </div>
+        `;
+      }
+      
+      div.innerHTML = metaHtml + contentHtml;
+      
+      // Insert based on timestamp (though usually appended)
+      // Simple append for log view
+      timeline.appendChild(div);
+      
+      if (autoScroll) {
+        timeline.scrollTop = timeline.scrollHeight;
+      }
+    }
+
+    async function loadSnapshot() {
+      try {
+        if (sid) {
+          const r = await fetch(`/session-history?agent=${encodeURIComponent(agent || 'main')}&sid=${encodeURIComponent(sid)}&limit=5000`, { cache: 'no-store' });
+          const j = await r.json();
+          if (j.items) j.items.forEach(renderEvent);
+          return;
+        }
+        const r = await fetch('/snapshot?limit=200', { cache: 'no-store' });
+        const j = await r.json();
+        if (j.items) {
+          const sorted = j.items.sort((a, b) => new Date(a.ts) - new Date(b.ts));
+          sorted.forEach(renderEvent);
+        }
+      } catch (err) { console.error(err); }
+    }
+
+    // Init
+    loadSnapshot();
+    
+    // SSE
+    const es = new EventSource('/events');
+    es.onmessage = (ev) => {
+      try {
+        const e = JSON.parse(ev.data);
+        renderEvent(e);
+      } catch (err) { console.error(err); }
+    };
+  </script>
+</body>
+</html>

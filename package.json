@@ -1,0 +1,15 @@
+{
+  "name": "openclaw-agent-monitor",
+  "version": "1.0.0",
+  "description": "A real-time web dashboard for monitoring OpenClaw agent sessions",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "PORT=4000 node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["openclaw", "agent", "monitor", "dashboard"],
+  "license": "MIT"
+}

@@ -1,0 +1,1047 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Monitor</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b0f14;color:#e6eef8;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+    header{padding:12px 16px;background:#0e1621;border-bottom:1px solid #1c2834;position:sticky;top:0;flex:0 0 auto}
+    h1{font-size:18px;margin:0}
+    #grid{display:flex;flex-direction:column;gap:12px;padding:12px;flex:1;min-height:0;overflow:auto;align-content:stretch;justify-content:stretch}
+    .agent-block{border:1px solid #1c2834;border-radius:10px;background:#0e1621;padding:10px;display:flex;flex-direction:column;gap:10px}
+    .agent-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .agent-grid{display:grid;gap:12px}
+    .card{background:#111a24;border:1px solid #1c2834;border-radius:8px;padding:12px;min-height:0;height:100%;display:flex;flex-direction:column;overflow:hidden;transition:transform .25s ease, box-shadow .25s ease, border-color .25s ease}
+    .card.primary{border-color:#2e7d32;box-shadow:0 0 0 1px rgba(46,125,50,.35),0 10px 28px rgba(46,125,50,.18)}
+    .card.highlight{border-color:#3a78ff;box-shadow:0 0 0 1px rgba(58,120,255,.45),0 10px 28px rgba(58,120,255,.18);animation:bump .45s ease}
+    @keyframes bump{0%{transform:translateY(0) scale(1)}40%{transform:translateY(-4px) scale(1.02)}100%{transform:translateY(0) scale(1)}}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .badge{font-size:12px;padding:2px 6px;border-radius:6px;border:1px solid #2a3e52;color:#d6e7ff}
+    .title{font-weight:600;color:#cfe3ff}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;color:#a8b3bf;word-break:break-all}
+    .ts{color:#7aa2d5;font-size:12px}
+    .card-body{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:10px;margin-top:10px}
+    .card.fullscreen .card-body{grid-template-columns:minmax(0,1fr) minmax(0,2fr)}
+    .pane{border:1px solid #1c2834;border-radius:8px;background:#0e1621;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+    .pane-head{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid #1c2834;background:#0b0f14}
+    .pane-title{font-size:13px;font-weight:700;color:#e8f2ff;letter-spacing:.2px}
+    .pane-sub{font-size:11px;color:#7aa2d5}
+    .pane-main{flex:1;min-height:0;display:flex;flex-direction:column}
+    .pane-list{flex:1;min-height:0;overflow:auto}
+    .pane-detail{flex:0 0 auto;max-height:48%;overflow:auto;border-top:1px solid #1c2834;padding:10px}
+    .card.fullscreen .pane-detail{max-height:55%}
+    .list-row{display:grid;grid-template-columns:52px max-content 92px 1fr;gap:8px;padding:7px 10px;border-bottom:1px dashed #243444;align-items:center;font-size:12px}
+    .list-row:hover{background:#0b0f14}
+    .list-row.selected{background:rgba(58,120,255,.12);border-bottom-color:rgba(58,120,255,.35)}
+    .cell-time{color:#5c6b7f;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+    .cell-type{color:#a8b3bf;font-weight:700;display:flex;gap:6px;align-items:center;overflow:visible;min-width:0}
+    .cell-tokens{color:#4caf50;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+    .cell-snippet{color:#7aa2d5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .detail-title{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .detail-block{margin-top:10px;white-space:pre-wrap;word-break:break-word;line-height:1.45;font-size:12px;color:#e6eef8}
+    .detail-meta{margin-top:8px;display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:#a8b3bf}
+    .detail-box{margin-top:10px;border:1px solid #2a3e52;border-radius:6px;background:#0b0f14;padding:8px;white-space:pre-wrap;word-break:break-word;font-size:13px;color:#d0dae5}
+    .health{margin-top:6px}
+    .health-head{display:flex;gap:8px;align-items:center;font-size:12px;color:#a8b3bf}
+    .health-bar{position:relative;margin-top:6px;height:10px;border-radius:6px;border:1px solid #2a3e52;background:#13202e;overflow:visible}
+    .health-fill{position:relative;height:100%;border-radius:6px}
+    .logs-container {margin-top:8px;height:220px;overflow-y:auto;border-top:1px solid #1c2834;padding-top:4px;background:#0e1621;border-radius:4px;padding:6px}
+    .logs-container::-webkit-scrollbar {width:6px}
+    .logs-container::-webkit-scrollbar-track {background:#111a24}
+    .logs-container::-webkit-scrollbar-thumb {background:#243444;border-radius:3px}
+    .btn-archive{margin-left:auto;cursor:pointer;opacity:0.6;font-size:12px;padding:2px 8px;border:1px solid #243444;border-radius:4px;color:#a9c7e7;background:transparent}
+    .btn-archive:hover{opacity:1;background:#1c2834}
+    .btn-danger{cursor:pointer;opacity:0.7;font-size:12px;padding:2px 8px;border:1px solid #5c2a2a;border-radius:4px;color:#ffb4b4;background:transparent}
+    .btn-danger:hover{opacity:1;background:#2a1717}
+    .btn-link{cursor:pointer;opacity:0.9;font-size:12px;padding:2px 8px;border:1px solid #243444;border-radius:4px;color:#7aa2d5;background:transparent}
+    .btn-link:hover{background:#1c2834}
+    .btn-copy{cursor:pointer;opacity:0.95;font-size:12px;padding:2px 8px;border:1px solid #2a3e52;border-radius:4px;color:#cfe3ff;background:transparent}
+    .btn-copy:hover{background:#13202e}
+    .header-row{display:flex;align-items:center;justify-content:space-between}
+    .toggle-archived{cursor:pointer;font-size:12px;color:#7aa2d5;border:1px solid #243444;padding:4px 8px;border-radius:4px;background:#0e1621}
+    .toggle-archived:hover{background:#1c2834}
+    .stats-table {width:100%;font-size:11px;border-collapse:collapse;margin-top:8px;color:#a8b3bf}
+    .stats-table th, .stats-table td {text-align:left;padding:2px 4px;border-bottom:1px solid #1c2834}
+    .stats-table th {color:#7aa2d5}
+    .toggle-details {cursor:pointer;color:#3a78ff;font-size:12px;margin-top:6px;display:inline-block}
+    .overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:flex-start;justify-content:center;padding:48px 16px;z-index:1000}
+    .panel{width:min(900px, 100%);background:#0e1621;border:1px solid #243444;border-radius:10px;box-shadow:0 14px 50px rgba(0,0,0,.5);overflow:hidden}
+    .panel-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #1c2834}
+    .panel-body{padding:12px 14px;max-height:70vh;overflow:auto}
+    .panel-row{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #1c2834}
+    .tag{display:inline-flex;align-items:center;gap:6px;font-size:11px;line-height:1;padding:2px 8px;border-radius:999px;border:1px solid #243444;background:#0b0f14;color:#e8f2ff;white-space:nowrap}
+    .tag-openai{border-color:#234a86;background:rgba(58,120,255,.15);color:#a9c7ff}
+    .tag-anthropic{border-color:#7a4a16;background:rgba(255,167,38,.14);color:#ffcc80}
+    .tag-google{border-color:#1b6b4e;background:rgba(76,175,80,.12);color:#a5d6a7}
+    .tag-qwen{border-color:#5e2a86;background:rgba(156,39,176,.12);color:#e1bee7}
+    .tag-deepseek{border-color:#4c4c4c;background:rgba(158,158,158,.12);color:#e0e0e0}
+    .tag-other{border-color:#2c3c4d;background:rgba(122,162,213,.10);color:#cfe3ff}
+  </style>
+  <script>
+    const state = new Map(); // agentId:sessionId -> { data..., lastTs, bumpTs, updatedAt, interactions: [] }
+    // 归档 Set
+    const archived = new Set(JSON.parse(localStorage.getItem('agent_monitor_archived') || '[]'));
+    let showArchived = false;
+    const expandedSessions = new Set(); // 用于记录展开了详情的 sessionId
+    const selectedStepIndexBySession = new Map();
+    const selectedApiIndexBySession = new Map();
+    let deletedPanelOpen = false;
+    let deletedCache = [];
+    let deletedCacheAt = 0;
+
+    function saveArchived() {
+      localStorage.setItem('agent_monitor_archived', JSON.stringify([...archived]));
+    }
+
+    function toggleArchive(key) {
+      if (archived.has(key)) {
+        archived.delete(key);
+      } else {
+        archived.add(key);
+      }
+      saveArchived();
+      render();
+    }
+    
+    function toggleDetails(key) {
+      if (expandedSessions.has(key)) {
+        expandedSessions.delete(key);
+      } else {
+        expandedSessions.add(key);
+      }
+      render();
+    }
+
+    function toggleShowArchived() {
+      showArchived = !showArchived;
+      render();
+    }
+
+    function fmtTs(ts){try{const d=new Date(typeof ts==='number'?ts:Date.parse(ts));return d.toLocaleTimeString()}catch{return String(ts)}}
+    function fmtTimeHms(ts){
+      try{
+        const d=new Date(typeof ts==='number'?ts:Date.parse(ts));
+        return d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0')+':'+d.getSeconds().toString().padStart(2,'0');
+      }catch{return '--:--:--'}
+    }
+    function escHtml(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+    function tryPrettyJson(s){
+      if (s == null) return '';
+      if (typeof s === 'object') return JSON.stringify(s, null, 2);
+      const str = String(s);
+      try{
+        const v = JSON.parse(str);
+        return JSON.stringify(v, null, 2);
+      }catch{
+        return str;
+      }
+    }
+
+    function extractTextFromFullContent(fullContent){
+      if (!fullContent || !Array.isArray(fullContent)) return '';
+      return fullContent
+        .filter(x => x && x.type === 'text' && typeof x.text === 'string')
+        .map(x => x.text)
+        .join('\n')
+        .trim();
+    }
+
+    function extractToolCallsFromFullContent(fullContent){
+      if (!fullContent || !Array.isArray(fullContent)) return [];
+      return fullContent
+        .filter(x => x && x.type === 'toolCall')
+        .map(x => ({
+          id: x.id,
+          name: x.name,
+          arguments: x.arguments
+        }));
+    }
+
+    function buildAssistantOutputText(fullContent, textPreview){
+      const text = extractTextFromFullContent(fullContent) || String(textPreview || '').trim();
+      const toolCalls = extractToolCallsFromFullContent(fullContent);
+      if (!toolCalls.length) return text;
+      const toolBlock = JSON.stringify(toolCalls, null, 2);
+      return [text, text ? '' : '', 'toolCalls:', toolBlock].filter(Boolean).join('\n');
+    }
+
+    async function writeClipboard(text) {
+      const payload = String(text == null ? '' : text);
+      if (!payload.trim()) return false;
+      try {
+        await navigator.clipboard.writeText(payload);
+        return true;
+      } catch {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = payload;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          ta.style.top = '0';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          return !!ok;
+        } catch {
+          return false;
+        }
+      }
+    }
+
+    function displayAgentName(agentId){
+      return agentId || 'unknown';
+    }
+
+    function makeKey(agentId, sessionId){
+      return `${agentId}:${sessionId}`;
+    }
+
+    function parseKey(key){
+      const idx = key.indexOf(':');
+      if (idx === -1) return { agentId: 'main', sessionId: key };
+      return { agentId: key.slice(0, idx), sessionId: key.slice(idx + 1) };
+    }
+
+    function buildSessionCopyText(key, extra = {}) {
+      const s = state.get(key) || {};
+      const { agentId, sessionId } = parseKey(key);
+      const interactions = Array.isArray(s.interactions) ? s.interactions : [];
+      const last = interactions.slice(0, 20).map((it) => {
+        const t = fmtTs(it.ts);
+        const type = it.type || '-';
+        const model = it.model ? ` ${it.model}` : '';
+        const text = String(extractTextFromFullContent(it.fullContent) || it.textPreview || it.content || '').trim();
+        return `- [${t}] ${type}${model}\n${text ? text : '-'}`;
+      }).join('\n\n');
+
+      const currentMsg = String((extractTextFromFullContent(s.fullContent) || s.textPreview || '')).trim();
+      const toolArgs = s.toolArgs != null ? tryPrettyJson(s.toolArgs) : '';
+
+      const header = [
+        `agentId: ${displayAgentName(agentId)}`,
+        `sessionId: ${sessionId}`,
+        s.ts ? `ts: ${fmtTs(s.ts)}` : '',
+        s.updatedAt ? `updatedAt: ${fmtTs(s.updatedAt)}` : '',
+        s.role ? `role: ${s.role}` : '',
+        s.provider ? `provider: ${s.provider}` : '',
+        s.model ? `model: ${s.model}` : '',
+        s.stopReason ? `stopReason: ${s.stopReason}` : '',
+        s.toolName ? `toolName: ${s.toolName}` : '',
+        s.errorMessage ? `error: ${s.errorMessage}` : '',
+      ].filter(Boolean).join('\n');
+
+      const parts = [
+        header,
+        toolArgs ? `\n---\ntoolArgs:\n${toolArgs}` : '',
+        currentMsg ? `\n---\ncurrentMessage:\n${currentMsg}` : '',
+        last ? `\n---\nrecentInteractions:\n${last}` : '',
+        extra && extra.text ? `\n---\n${extra.title || 'extra'}:\n${extra.text}` : '',
+      ].filter(Boolean);
+
+      return parts.join('\n');
+    }
+
+    async function copySessionDetail(key) {
+      const ok = await writeClipboard(buildSessionCopyText(key));
+      if (!ok) alert('复制失败：浏览器未授予剪贴板权限');
+    }
+
+    async function copyStepDetail(key) {
+      const s = state.get(key) || {};
+      const currentStep = getCurrentStepLabel(s);
+      const currentMsg = String((extractTextFromFullContent(s.fullContent) || s.textPreview || '')).trim();
+      const extra = {
+        title: 'step',
+        text: [
+          `currentStep: ${currentStep}`,
+          currentMsg ? `message:\n${currentMsg}` : 'message: -',
+        ].join('\n'),
+      };
+      const ok = await writeClipboard(buildSessionCopyText(key, extra));
+      if (!ok) alert('复制失败：浏览器未授予剪贴板权限');
+    }
+
+    async function copyApiDetail(key) {
+      const s = state.get(key) || {};
+      const all = Array.isArray(s.interactions) ? s.interactions : [];
+      const apiOnly = all.filter(i => i && i.role === 'assistant' && i.model);
+      const view = apiOnly.slice(0, 50);
+      const sel = Math.min(Math.max(0, Number(selectedApiIndexBySession.get(sid) || 0)), Math.max(0, view.length - 1));
+      const selected = view[sel] || null;
+      if (!selected) {
+        const ok = await writeClipboard(buildSessionCopyText(key, { title: 'api', text: 'no selected api call' }));
+        if (!ok) alert('复制失败：浏览器未授予剪贴板权限');
+        return;
+      }
+
+      const tokenIn = selected.usage?.input || 0;
+      const tokenOut = selected.usage?.output || 0;
+      const tokenCacheR2 = selected.usage?.cacheRead || 0;
+      const tokenCacheW2 = selected.usage?.cacheWrite || 0;
+      const tokenCtx2 = tokenIn + tokenCacheR2 + tokenCacheW2;
+      const inText = findNearestUserInput(all, selected.ts) || '';
+      const outText = String(buildAssistantOutputText(selected.fullContent, selected.textPreview)).trim();
+      const payload = [
+        selected.ts ? `ts: ${fmtTs(selected.ts)}` : '',
+        selected.provider ? `provider: ${selected.provider}` : '',
+        selected.model ? `model: ${selected.model}` : '',
+        selected.stopReason ? `stopReason: ${selected.stopReason}` : '',
+        selected.errorMessage ? `error: ${selected.errorMessage}` : '',
+        `ctx: ${tokenCtx2.toLocaleString()} (in:${tokenIn.toLocaleString()} cR:${tokenCacheR2.toLocaleString()} cW:${tokenCacheW2.toLocaleString()}) → out: ${tokenOut.toLocaleString()}`,
+        '',
+        'input:',
+        inText ? inText : '-',
+        '',
+        'output:',
+        outText ? outText : '-',
+        '',
+        'raw:',
+        tryPrettyJson(selected),
+      ].filter(Boolean).join('\n');
+
+      const ok = await writeClipboard(buildSessionCopyText(key, { title: 'api', text: payload }));
+      if (!ok) alert('复制失败：浏览器未授予剪贴板权限');
+    }
+
+    function findNearestUserInput(interactions, botTs){
+      const target = new Date(botTs || 0).getTime();
+      if (!Number.isFinite(target) || !Array.isArray(interactions)) return '';
+      for (const it of interactions) {
+        const t = new Date(it.ts || 0).getTime();
+        if (!Number.isFinite(t)) continue;
+        if (t <= target && it.role === 'user') {
+          const text = extractTextFromFullContent(it.fullContent) || it.textPreview || it.content || '';
+          return String(text).trim();
+        }
+      }
+      return '';
+    }
+    function fmtCompact(n){
+      const x = Number(n);
+      if (!Number.isFinite(x)) return '0';
+      const ax = Math.abs(x);
+      const sign = x < 0 ? '-' : '';
+      if (ax >= 1e9) return sign + (ax / 1e9).toFixed(1).replace(/\.0$/,'') + 'B';
+      if (ax >= 1e6) return sign + (ax / 1e6).toFixed(1).replace(/\.0$/,'') + 'M';
+      if (ax >= 1e3) return sign + (ax / 1e3).toFixed(1).replace(/\.0$/,'') + 'K';
+      return String(x);
+    }
+    function modelFamily(model){
+      const m = String(model||'').toLowerCase();
+      if (m.includes('claude') || m.includes('anthropic')) return 'anthropic';
+      if (m.includes('gpt') || m.includes('openai')) return 'openai';
+      if (m.includes('gemini') || m.includes('google')) return 'google';
+      if (m.includes('qwen') || m.includes('aliyun') || m.includes('alibaba')) return 'qwen';
+      if (m.includes('deepseek')) return 'deepseek';
+      return 'other';
+    }
+
+    function selectStep(key, idx){
+      selectedStepIndexBySession.set(key, Number(idx)||0);
+      render();
+    }
+
+    function selectApi(key, idx){
+      selectedApiIndexBySession.set(key, Number(idx)||0);
+      render();
+    }
+
+    function getCurrentStepLabel(s){
+      const interactions = Array.isArray(s?.interactions) ? s.interactions : [];
+      const top = interactions[0];
+      if (top) {
+        if (top.type === 'ToolCall') return `工具调用: ${top.toolName || top.content || 'tool'}`;
+        if (top.type === 'ToolResult') return `工具结果: ${top.resultToolName || top.resultToolId || 'tool'}`;
+        if (top.type === 'User') return '用户输入';
+        if (top.type === 'Bot') return top.stopReason ? `状态: ${top.stopReason}` : '模型回复';
+      }
+      if (s?.toolName) return `工具: ${s.toolName}`;
+      if (s?.stopReason) return `状态: ${s.stopReason}`;
+      return '消息更新';
+    }
+
+    function computeGridLayout(n, width){
+      const w = width || window.innerWidth || 1200;
+      let cols = Math.floor(w / 420);
+      cols = Math.max(1, Math.min(n || 1, cols || 1));
+      return { cols };
+    }
+
+    function applyGridLayoutTo(grid, n){
+      const { cols } = computeGridLayout(n, grid ? grid.clientWidth : undefined);
+      if (grid) grid.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+    }
+
+    let autoDeleteSettingsCache = null;
+
+    async function loadAutoDeleteSettings(force = false) {
+      if (!force && autoDeleteSettingsCache) return autoDeleteSettingsCache;
+      const r = await fetch('/api/monitor/auto-soft-delete', { cache: 'no-store' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      autoDeleteSettingsCache = j;
+      return j;
+    }
+
+    function openAutoDeleteSettings() {
+      const overlay = document.getElementById('settings-overlay');
+      overlay.style.display = 'flex';
+      renderAutoDeleteSettings();
+    }
+
+    function closeAutoDeleteSettings() {
+      const overlay = document.getElementById('settings-overlay');
+      overlay.style.display = 'none';
+    }
+
+    async function renderAutoDeleteSettings() {
+      const box = document.getElementById('settings-box');
+      box.innerHTML = '<div class="mono">加载中…</div>';
+      try {
+        const j = await loadAutoDeleteSettings(true);
+        const cfg = j && j.config ? j.config : {};
+        const enabled = !!cfg.enabled;
+        const ttlHours = cfg.ttlMs ? (cfg.ttlMs / (60 * 60 * 1000)) : 1;
+        const intervalMin = cfg.intervalMs ? (cfg.intervalMs / (60 * 1000)) : 10;
+        box.innerHTML = `
+          <div class="row" style="justify-content:space-between">
+            <div class="row" style="gap:10px">
+              <div class="badge">自动软删</div>
+              <div class="mono">超过 N 小时无更新自动软删除</div>
+            </div>
+            <div class="row">
+              <button class="toggle-archived" onclick="closeAutoDeleteSettings()">关闭</button>
+            </div>
+          </div>
+          <div style="margin-top:12px;display:grid;grid-template-columns:1fr;gap:10px">
+            <label class="row" style="gap:10px">
+              <input id="auto-delete-enabled" type="checkbox" ${enabled ? 'checked' : ''} />
+              <span class="mono">启用</span>
+            </label>
+            <div class="row" style="gap:10px">
+              <div class="mono" style="min-width:120px">无更新阈值</div>
+              <input id="auto-delete-ttl-hours" type="number" min="0.1" step="0.1" value="${ttlHours}" style="width:120px;background:#0b0f14;border:1px solid #243444;color:#e6eef8;border-radius:6px;padding:6px 8px" />
+              <div class="mono">小时</div>
+            </div>
+            <div class="row" style="gap:10px">
+              <div class="mono" style="min-width:120px">扫描间隔</div>
+              <input id="auto-delete-interval-min" type="number" min="0.2" step="0.2" value="${intervalMin}" style="width:120px;background:#0b0f14;border:1px solid #243444;color:#e6eef8;border-radius:6px;padding:6px 8px" />
+              <div class="mono">分钟</div>
+            </div>
+            <div class="row" style="justify-content:flex-end;gap:10px">
+              <button class="toggle-archived" onclick="saveAutoDeleteSettings()">保存并生效</button>
+            </div>
+          </div>
+        `;
+      } catch (e) {
+        box.innerHTML = `<div class="mono" style="color:#ffb4b4">加载失败：${escHtml(e && e.message || e)}</div>`;
+      }
+    }
+
+    async function saveAutoDeleteSettings() {
+      try {
+        const enabled = !!document.getElementById('auto-delete-enabled')?.checked;
+        const ttlHours = parseFloat(document.getElementById('auto-delete-ttl-hours')?.value || '1');
+        const intervalMin = parseFloat(document.getElementById('auto-delete-interval-min')?.value || '10');
+        const ttlMs = Math.round(ttlHours * 60 * 60 * 1000);
+        const intervalMs = Math.round(intervalMin * 60 * 1000);
+        const r = await fetch('/api/monitor/auto-soft-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled, ttlMs, intervalMs })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || r.statusText);
+        autoDeleteSettingsCache = null;
+        await renderAutoDeleteSettings();
+        alert('已保存并生效');
+      } catch (e) {
+        alert(`保存失败：${String(e && e.message || e)}`);
+      }
+    }
+
+    function openHistory(key) {
+      const s = state.get(key) || {};
+      const agentId = s.agentId || 'main';
+      const sessionId = s.sessionId || '';
+      location.href = `/activity?agent=${encodeURIComponent(agentId)}&sid=${encodeURIComponent(sessionId)}`;
+    }
+
+    async function softDeleteSession(key) {
+      const s = state.get(key) || {};
+      const agentId = s.agentId || 'main';
+      const sessionId = s.sessionId || '';
+      if (!confirm(`确定要软删这个 session 吗？\n\n${sessionId}\n\n可在「已删除」里恢复。`)) return;
+      try {
+        const r = await fetch(`/session-delete?agent=${encodeURIComponent(agentId)}&sid=${encodeURIComponent(sessionId)}`, { method: 'POST' });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          alert(`删除失败：${j.error || r.statusText}`);
+          return;
+        }
+        state.delete(key);
+        archived.delete(key);
+        expandedSessions.delete(key);
+        saveArchived();
+        await refreshDeletedList(true);
+        render();
+      } catch (e) {
+        alert(`删除失败：${String(e && e.message || e)}`);
+      }
+    }
+
+    async function restoreSession(agentId, sessionId) {
+      try {
+        const r = await fetch(`/session-restore?agent=${encodeURIComponent(agentId)}&sid=${encodeURIComponent(sessionId)}`, { method: 'POST' });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          alert(`恢复失败：${j.error || r.statusText}`);
+          return;
+        }
+        await refreshDeletedList(true);
+        pollSnapshot();
+      } catch (e) {
+        alert(`恢复失败：${String(e && e.message || e)}`);
+      }
+    }
+
+    async function refreshDeletedList(force = false) {
+      const now = Date.now();
+      if (!force && deletedCacheAt && (now - deletedCacheAt < 2000)) return deletedCache;
+      try {
+        const r = await fetch('/sessions?includeDeleted=1', { cache: 'no-store' });
+        if (!r.ok) return deletedCache;
+        const j = await r.json();
+        const agents = Array.isArray(j.agents) ? j.agents : [];
+        const flattened = [];
+        for (const a of agents) {
+          const agentId = a.agentId || 'main';
+          const deleted = Array.isArray(a.deleted) ? a.deleted : [];
+          for (const item of deleted) {
+            flattened.push({ ...item, agentId });
+          }
+        }
+        deletedCache = flattened;
+        deletedCacheAt = now;
+        return deletedCache;
+      } catch {
+        return deletedCache;
+      }
+    }
+
+    async function toggleDeletedPanel() {
+      deletedPanelOpen = !deletedPanelOpen;
+      const overlay = document.getElementById('deleted-overlay');
+      overlay.style.display = deletedPanelOpen ? 'flex' : 'none';
+      if (!deletedPanelOpen) return;
+      await refreshDeletedList(true);
+      renderDeletedPanel();
+    }
+
+    function renderDeletedPanel() {
+      const list = document.getElementById('deleted-list');
+      const items = deletedCache || [];
+      if (!items.length) {
+        list.innerHTML = '<div class="mono">暂无已删除 session</div>';
+        return;
+      }
+      list.innerHTML = items.map((it) => {
+        const agentId = it.agentId || 'main';
+        const sid = it.sessionId || '';
+        const t = it.deletedAt ? fmtTs(it.deletedAt) : '-';
+        return `
+          <div class="panel-row">
+            <div class="row" style="gap:10px">
+              <div class="badge">Agent</div>
+              <div class="mono">${escHtml(agentId)}</div>
+              <div class="badge">Deleted</div>
+              <div class="mono">${sid}</div>
+              <div class="ts">${t}</div>
+            </div>
+            <div class="row" style="gap:8px">
+              <button class="btn-link" onclick="openHistory('${makeKey(agentId, sid)}')">历史</button>
+              <button class="btn-link" onclick="restoreSession('${agentId}', '${sid}')">恢复</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+    
+    function upsert(e, isSnapshot = false){
+      const agentId = e.agentId || 'main';
+      const sessionId = e.sessionId || 'unknown';
+      const k = makeKey(agentId, sessionId);
+      const now=Date.now();
+      const prev=state.get(k)||{interactions:[]};
+      
+      // 检查是否为新更新，以触发自动回归（unarchive）
+      const newTs = new Date(e.ts).getTime();
+      const oldTs = prev.lastTs ? new Date(prev.lastTs).getTime() : 0;
+      
+      // 如果已归档，且收到比当前记录更新的消息（排除初始快照加载旧数据的情况），则自动解除归档
+      if (!isSnapshot && archived.has(k) && oldTs > 0 && newTs > oldTs) {
+        archived.delete(k);
+        saveArchived();
+      }
+      
+      // 更新 interactions 列表
+      let interactions = prev.interactions ? [...prev.interactions] : [];
+      
+      // 构建 interaction 对象
+      let iType = 'Info';
+      let iContent = '';
+      
+      const isToolResult = e.role === 'toolResult' || e.resultToolName || e.resultToolId;
+      const text = e.textPreview || '';
+
+      if (e.toolName) {
+        iType = 'ToolCall';
+        iContent = `Call: ${e.toolName}`;
+      } else if (isToolResult) {
+        iType = 'ToolResult';
+        iContent = `Result: ${e.resultToolName || e.resultToolId || 'tool'}`;
+      } else if (e.role === 'user') {
+        iType = 'User';
+        iContent = text || 'User Input';
+      } else if (e.role === 'assistant') {
+        iType = 'Bot';
+        iContent = text || (e.stopReason ? `Stop: ${e.stopReason}` : 'Response');
+      } else if (e.role === 'system') {
+        iType = 'System';
+        iContent = 'System Instruction';
+      } else if (text) {
+        iType = 'Info';
+        iContent = text;
+      }
+      
+      // 简单的去重指纹
+      const fingerprint = `${e.ts}_${iType}_${iContent}`;
+      const exists = interactions.some(item => `${item.ts}_${item.type}_${item.content}` === fingerprint);
+      
+      if (!exists && iContent) {
+        interactions.push({
+          ts: e.ts,
+          type: iType,
+          content: iContent,
+          model: e.model,
+          usage: e.usage,
+          role: e.role,
+          provider: e.provider,
+          toolName: e.toolName,
+          toolArgs: e.toolArgs,
+          resultToolName: e.resultToolName,
+          resultToolId: e.resultToolId,
+          stopReason: e.stopReason,
+          errorMessage: e.errorMessage,
+          msgId: e.msgId,
+          textPreview: text,
+          fullContent: e.fullContent
+        });
+        
+        // 排序
+        interactions.sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
+        // 限制数量
+        if (interactions.length > 50) interactions = interactions.slice(0, 50);
+      }
+      
+      // 计算累计 Token 消耗 (Local visible)
+      const localTokens = interactions.reduce((acc, curr) => {
+        if (curr.usage) {
+          acc.input += (curr.usage.input || 0);
+          acc.output += (curr.usage.output || 0);
+        }
+        return acc;
+      }, { input: 0, output: 0 });
+      
+      // Prefer server-provided total if available (from snapshot stats), otherwise use local
+      const finalTokens = prev.serverTotalTokens || localTokens;
+
+      state.set(k,{...prev,...e,agentId,sessionId,lastTs:e.ts, bumpTs: isSnapshot ? (prev.bumpTs||now) : now, updatedAt: isSnapshot ? (prev.updatedAt||now) : now, interactions, totalTokens: finalTokens});
+      render();
+    }
+    
+    function renderStepPane(key, interactions, isFullscreen){
+      const steps = Array.isArray(interactions) ? interactions : [];
+      const max = isFullscreen ? 10 : 7;
+      const view = steps.slice(0, max);
+      const listHtml = view.length ? view.map((i) => {
+        let snippet = i.textPreview || i.content || '';
+        if (typeof snippet !== 'string') snippet = JSON.stringify(snippet);
+        snippet = snippet.replace(/\s+/g, ' ').trim();
+        if (snippet.length > 80) snippet = snippet.slice(0, 80) + '…';
+        return `
+          <div class="list-row">
+            <div class="cell-time">${fmtTimeHms(i.ts)}</div>
+            <div class="cell-type">${escHtml(i.type || '-')}</div>
+            <div class="cell-tokens">-</div>
+            <div class="cell-snippet" title="${escHtml(i.textPreview || i.content || '')}">${escHtml(snippet || '-')}</div>
+          </div>
+        `;
+      }).join('') : `<div class="mono" style="padding:10px">暂无步骤</div>`;
+
+      const s = state.get(key) || {};
+      const totalTokens = s.totalTokens || { input:0, output:0 };
+      const fam = modelFamily(s.model || '');
+      const modelRaw = s.model || '';
+      const modelName = modelRaw ? modelRaw.split('/').pop() : '-';
+      const modelTag = modelRaw ? `<span class="tag tag-${fam}" title="${escHtml(modelRaw)}">${escHtml(modelName)}</span>` : '';
+      const err = s.errorMessage ? `<div class="mono" style="color:#ffb4b4">${escHtml(s.errorMessage)}</div>` : '';
+      const toolArgs = s.toolArgs ? `<div class="detail-box" style="max-height:180px;overflow:auto">${escHtml(tryPrettyJson(s.toolArgs))}</div>` : '';
+      const currentMsg = (extractTextFromFullContent(s.fullContent) || s.textPreview || '').trim();
+      const currentMsgBlock = currentMsg
+        ? `<div class="detail-box" style="color:#e6eef8;max-height:180px;overflow:auto">${escHtml(currentMsg)}</div>`
+        : `<div class="detail-box" style="color:#5c6b7f;font-style:italic;max-height:180px;overflow:auto">当前步骤没有消息</div>`;
+      const currentStep = getCurrentStepLabel(s);
+      
+      // 上下文长度：取最新一次 API 调用的 input+cacheRead+cacheWrite
+      const latestApiCall = interactions.find(i => i && i.role === 'assistant' && i.usage);
+      const latestUsage = latestApiCall?.usage || null;
+      const ctxLen = latestUsage ? (latestUsage.input||0) + (latestUsage.cacheRead||0) + (latestUsage.cacheWrite||0) : 0;
+      const ctxWindow = 128000;
+      const pct = Math.min(Math.round((ctxLen / ctxWindow) * 100), 200);
+      const pctLabel = `${pct}%`;
+      const healthColor = pct <= 50 ? '#35c46a' : (pct <= 75 ? '#edb232' : (pct <= 90 ? '#f15e5e' : '#d66bff'));
+      const totalHuman = fmtCompact(ctxLen);
+
+      return `
+        <div class="pane">
+          <div class="pane-head">
+            <div class="pane-title">消息与步骤</div>
+            <div class="row" style="gap:8px">
+              <div class="pane-sub">${escHtml(view.length ? `最近 ${view.length} 条` : '')}</div>
+              <button class="btn-copy" onclick="copyStepDetail('${key}')">复制</button>
+            </div>
+          </div>
+          <div class="pane-main" style="padding:10px;gap:10px">
+            <div class="row" style="gap:8px">
+              <div class="badge">${escHtml(s.role||'n/a')}</div>
+              <div class="badge">${escHtml(s.provider||'provider')}</div>
+              ${modelTag}
+              <div class="badge" title="${(totalTokens.input||0).toLocaleString()+'/'+(totalTokens.output||0).toLocaleString()}">${fmtCompact((totalTokens.input||0)+(totalTokens.output||0))}</div>
+              <div class="ts">${fmtTs(s.ts)}</div>
+            </div>
+            <div class="health">
+              <div class="health-head">
+                <span class="badge">上下文</span>
+                <span class="mono">${escHtml(pctLabel)}</span>
+                <span class="mono">${escHtml(totalHuman)} / 128K</span>
+              </div>
+              <div class="health-bar">
+                <div class="health-fill" style="width:${pct}%;background:${healthColor}"></div>
+              </div>
+            </div>
+            <div class="row" style="gap:8px">
+              <div class="badge">当前步骤</div>
+              <div class="title">${escHtml(currentStep)}</div>
+            </div>
+            ${currentMsgBlock}
+            ${err || ''}
+            ${toolArgs || ''}
+            <div class="pane-list">${listHtml}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderApiPane(key, interactions, isFullscreen){
+      const all = Array.isArray(interactions) ? interactions : [];
+      const apiOnly = all.filter(i => i && i.role === 'assistant' && i.model);
+      const max = 50;
+      const view = apiOnly.slice(0, max);
+      const sel = Math.min(Math.max(0, Number(selectedApiIndexBySession.get(key) || 0)), Math.max(0, view.length - 1));
+      const selected = view[sel] || null;
+
+      const listHtml = view.length ? view.map((i, idx) => {
+        let snippet = i.textPreview || extractTextFromFullContent(i.fullContent) || i.content || '';
+        snippet = String(snippet || '').replace(/\s+/g,' ').trim();
+        if (snippet.length > 120) snippet = snippet.slice(0, 120) + '…';
+        const tokenCtx = i.usage ? (i.usage.input||0) + (i.usage.cacheRead||0) + (i.usage.cacheWrite||0) : 0;
+        const tokenOut = i.usage?.output || 0;
+        const tokens = i.usage ? `${fmtCompact(tokenCtx)}→${fmtCompact(tokenOut)}` : '-';
+        const tokensTitle = i.usage ? `in:${(i.usage.input||0).toLocaleString()} cR:${(i.usage.cacheRead||0).toLocaleString()} cW:${(i.usage.cacheWrite||0).toLocaleString()} out:${tokenOut.toLocaleString()}` : '';
+        const fam = modelFamily(i.model || '');
+        const modelRaw = i.model || '';
+        const modelName = modelRaw ? modelRaw.split('/').pop() : '-';
+        const modelTag = modelRaw ? `<span class="tag tag-${fam}" title="${escHtml(modelRaw)}">${escHtml(modelName)}</span>` : '-';
+        return `
+          <div class="list-row ${idx===sel?'selected':''}" onclick="selectApi('${key}', ${idx})">
+            <div class="cell-time">${fmtTimeHms(i.ts)}</div>
+            <div class="cell-type"><span class="badge">Bot</span>${modelTag}</div>
+            <div class="cell-tokens" title="${escHtml(tokensTitle)}">${tokens}</div>
+            <div class="cell-snippet" title="${escHtml(snippet)}">${escHtml(snippet || '-')}</div>
+          </div>
+        `;
+      }).join('') : `<div class="mono" style="padding:10px">暂无 API 调用</div>`;
+
+      let detailHtml = '<div class="mono">暂无详情</div>';
+      if (selected) {
+        const fam = modelFamily(selected.model || '');
+        const modelRaw = selected.model || '';
+        const modelName = modelRaw ? modelRaw.split('/').pop() : '-';
+        const modelTag = modelRaw ? `<span class="tag tag-${fam}" title="${escHtml(modelRaw)}">${escHtml(modelName)}</span>` : '';
+
+        const tokenIn = selected.usage?.input || 0;
+        const tokenOut = selected.usage?.output || 0;
+        const tokenCacheR = selected.usage?.cacheRead || 0;
+        const tokenCacheW = selected.usage?.cacheWrite || 0;
+        const tokenCtx = tokenIn + tokenCacheR + tokenCacheW;
+        const tokens = selected.usage ? `ctx ${tokenCtx.toLocaleString()} → out ${tokenOut.toLocaleString()}` : '-';
+        const provider = selected.provider || '';
+        const stop = selected.stopReason ? `Stop: ${selected.stopReason}` : '';
+        const err = selected.errorMessage ? `错误: ${selected.errorMessage}` : '';
+
+        const inText = findNearestUserInput(all, selected.ts) || '';
+        const inputBlock = inText
+          ? `<div class="detail-box" style="color:#e6eef8;max-height:220px;overflow:auto">${escHtml(inText)}</div>`
+          : `<div class="detail-box" style="color:#5c6b7f;font-style:italic;max-height:220px;overflow:auto">当前步骤没有消息</div>`;
+
+        const outText = (buildAssistantOutputText(selected.fullContent, selected.textPreview) || '').trim();
+        const outputBlock = outText
+          ? `<div class="detail-box" style="color:#e6eef8;max-height:220px;overflow:auto">${escHtml(outText)}</div>`
+          : `<div class="detail-box" style="color:#5c6b7f;font-style:italic;max-height:220px;overflow:auto">当前步骤没有消息</div>`;
+
+        detailHtml = `
+          <div class="detail-title">
+            <span class="badge">命令: Bot</span>
+            ${provider ? `<span class="badge">${escHtml(provider)}</span>` : ''}
+            ${modelTag}
+          </div>
+          <div class="detail-meta">
+            <span>时间: ${escHtml(fmtTs(selected.ts))}</span>
+            <span>${escHtml(tokens)}</span>
+            ${(tokenCacheR > 0 || tokenCacheW > 0) ? `<span style="color:#7a90a8">缓存读/写: ${tokenCacheR.toLocaleString()}/${tokenCacheW.toLocaleString()}</span>` : ''}
+            ${stop ? `<span>${escHtml(stop)}</span>` : ''}
+            ${err ? `<span style="color:#ffb4b4">${escHtml(err)}</span>` : ''}
+          </div>
+          <div class="row" style="gap:8px;margin-top:10px">
+            <div class="badge">入参</div>
+          </div>
+          ${inputBlock}
+          <div class="row" style="gap:8px;margin-top:10px">
+            <div class="badge">返回参数</div>
+          </div>
+          ${outputBlock}
+        `;
+      }
+
+      return `
+        <div class="pane">
+          <div class="pane-head">
+            <div class="pane-title">API 调用</div>
+            <div class="row" style="gap:8px">
+              <div class="pane-sub">${escHtml(view.length ? `最近 ${view.length} 条` : '')}</div>
+              <button class="btn-copy" onclick="copyApiDetail('${key}')">复制</button>
+            </div>
+          </div>
+          <div class="pane-main">
+            <div class="pane-list">${listHtml}</div>
+            <div class="pane-detail">${detailHtml}</div>
+          </div>
+        </div>
+      `;
+    }
+    
+    function render(){
+      const grid=document.getElementById('grid');
+      // 只有在 grid 为空或者有结构变化时才完全重绘可能会更好，但这里简单起见全量重绘
+      // 为了防止输入状态丢失（虽然目前没有输入框），可以考虑优化
+      // 这里直接清空重绘
+      grid.innerHTML='';
+      const btnToggle = document.getElementById('btn-toggle-archived');
+      if(btnToggle) btnToggle.textContent = showArchived ? '隐藏归档' : `显示归档 (${archived.size})`;
+      const btnDeleted = document.getElementById('btn-toggle-deleted');
+      if (btnDeleted) {
+        const n = deletedCache && deletedCache.length ? deletedCache.length : 0;
+        btnDeleted.textContent = `已删除 (${n})`;
+      }
+
+      const groups = new Map();
+      for (const [key, s] of state.entries()) {
+        const agentId = s.agentId || 'main';
+        if (!groups.has(agentId)) groups.set(agentId, []);
+        groups.get(agentId).push([key, s]);
+      }
+      const agentIds = [...groups.keys()].sort();
+      const activeSet = expandedSessions.size ? new Set(expandedSessions) : null;
+      if (!agentIds.length) {
+        grid.innerHTML = '<div class="mono">暂无 session</div>';
+        return;
+      }
+      agentIds.forEach((agentId) => {
+        const allItems = groups.get(agentId) || [];
+        const sorted = allItems.sort((a, b) => {
+          const tsA = new Date(a[1].lastTs || 0).getTime();
+          const tsB = new Date(b[1].lastTs || 0).getTime();
+          if (tsB !== tsA) return tsB - tsA;
+          return (b[1].bumpTs || 0) - (a[1].bumpTs || 0);
+        });
+        const items = sorted.filter(([key]) => showArchived ? true : !archived.has(key));
+        const visibleItems = activeSet ? items.filter(([key]) => activeSet.has(key)) : items;
+        const block = document.createElement('div');
+        block.className = 'agent-block';
+        const count = visibleItems.length;
+        block.innerHTML = `
+          <div class="agent-head">
+            <div class="badge">Agent</div>
+            <div class="mono">${escHtml(displayAgentName(agentId))}</div>
+            <div class="badge">Sessions</div>
+            <div class="mono">${count}</div>
+          </div>
+        `;
+        const agentGrid = document.createElement('div');
+        agentGrid.className = 'agent-grid';
+        if (expandedSessions.size === 1) {
+          agentGrid.style.gridTemplateColumns = 'minmax(0, 1fr)';
+        } else {
+          applyGridLayoutTo(agentGrid, Math.max(1, count));
+        }
+        visibleItems.forEach(([key, s], idx) => {
+          const { sessionId } = parseKey(key);
+          const isArchived = archived.has(key);
+          const isPrimary = !isArchived && idx === 0;
+          const now = Date.now();
+          const isHighlight = s.updatedAt && (now - s.updatedAt < 3000);
+          const isExpanded = expandedSessions.has(key);
+          const isFullscreen = expandedSessions.size === 1 && isExpanded;
+          const el = document.createElement('div');
+          el.className = 'card' + (isPrimary ? ' primary' : '') + (isHighlight ? ' highlight' : '') + (isFullscreen ? ' fullscreen' : '');
+          if (isArchived) el.style.opacity = '0.6';
+          el.innerHTML = `
+            <div class="row">
+              <div class="badge">Session</div>
+              <div class="mono">${escHtml(sessionId)}</div>
+              <button class="btn-link" onclick="openHistory('${key}')">历史</button>
+              <button class="btn-copy" onclick="copySessionDetail('${key}')">复制</button>
+              <button class="btn-danger" onclick="softDeleteSession('${key}')">删除</button>
+              <button class="btn-link" onclick="toggleDetails('${key}')">${isExpanded ? '取消激活' : '激活'}</button>
+              <button class="btn-archive" onclick="toggleArchive('${key}')">${isArchived ? '取消归档' : '归档'}</button>
+            </div>
+            <div class="row" style="margin-top:6px">
+              <div class="badge">${escHtml(s.role||'n/a')}</div>
+              <div class="badge">${escHtml(s.provider||'provider')}</div>
+              <div class="badge">${escHtml(s.model||'model')}</div>
+              <div class="badge" title="Total Tokens: ${(s.totalTokens?.input||0).toLocaleString()}/${(s.totalTokens?.output||0).toLocaleString()}">${fmtCompact((s.totalTokens?.input||0) + (s.totalTokens?.output||0))} (${fmtCompact(s.totalTokens?.input||0)}/${fmtCompact(s.totalTokens?.output||0)})</div>
+              <div class="ts">${fmtTs(s.ts)}</div>
+            </div>
+            <div class="row" style="margin-top:6px">
+              <div class="badge">最近一步</div>
+              <div class="title">${escHtml(getCurrentStepLabel(s))}</div>
+            </div>
+            ${s.toolArgs ? `<div class="mono" style="margin-top:6px;max-height:100px;overflow:auto">${JSON.stringify(s.toolArgs)}</div>` : ''}
+            ${s.errorMessage ? `<div class="mono" style="margin-top:6px;color:#ffb4b4;max-height:100px;overflow:auto">错误: ${s.errorMessage}</div>` : ''}
+            <div class="card-body">
+              ${renderStepPane(key, s.interactions || [], isFullscreen)}
+              ${renderApiPane(key, s.interactions || [], isFullscreen)}
+            </div>
+          `;
+          agentGrid.appendChild(el);
+        });
+        block.appendChild(agentGrid);
+        grid.appendChild(block);
+      });
+    }
+    async function pollSnapshot(){
+      try{
+        const r=await fetch('/snapshot',{cache:'no-store'});
+        if(!r.ok) return;
+        const j=await r.json();
+        if(Array.isArray(j.items)){
+          const now=Date.now();
+          for(const e of j.items){
+            upsert(e, true);
+          }
+          
+          // Handle server-side stats if available
+          if (j.stats) {
+            let changed = false;
+            for (const [agentId, sessions] of Object.entries(j.stats)) {
+              for (const [sid, stat] of Object.entries(sessions || {})) {
+                const key = makeKey(agentId, sid);
+                const s = state.get(key);
+                if (s) {
+                  state.set(key, { ...s, serverTotalTokens: stat, totalTokens: stat });
+                  changed = true;
+                }
+              }
+            }
+            if (changed) render();
+          }
+          
+          if (j.activeByAgent) {
+            const activeSet = new Set();
+            for (const [agentId, sessions] of Object.entries(j.activeByAgent)) {
+              for (const sid of sessions || []) {
+                activeSet.add(makeKey(agentId, sid));
+              }
+            }
+            let pruned = false;
+            for (const key of [...state.keys()]) {
+              if (!activeSet.has(key)) {
+                state.delete(key);
+                archived.delete(key);
+                expandedSessions.delete(key);
+                pruned = true;
+              }
+            }
+            if (pruned) {
+              saveArchived();
+              render();
+            }
+          }
+        }
+      }catch{}
+    }
+    window.addEventListener('DOMContentLoaded',()=>{
+      // 立即拉取一次快照，保证首次加载有数据
+      pollSnapshot();
+      setInterval(pollSnapshot, 4000);
+      refreshDeletedList(true).then(() => render());
+      setInterval(() => refreshDeletedList(false).then(() => render()), 5000);
+      // 同时尝试建立 SSE（若不可用则忽略，由快照兜底）
+      const es=new EventSource('/events');
+      es.onmessage=(ev)=>{try{const e=JSON.parse(ev.data);upsert(e, false)}catch{}};
+      es.onerror=()=>{};
+      setInterval(render,2000);
+      window.addEventListener('resize', ()=>render());
+    });
+  </script>
+</head>
+<body>
+  <header>
+    <div class="header-row">
+          <h1>Agent → Session 实时监控</h1>
+      <div class="row">
+        <a href="/heartbeat.html" class="toggle-archived" style="text-decoration:none">Heartbeat Scheduler</a>
+        <button class="toggle-archived" onclick="location.href='/activity'">详细时间轴 (Activity)</button>
+        <button class="toggle-archived" onclick="openAutoDeleteSettings()">自动软删设置</button>
+        <button id="btn-toggle-deleted" class="toggle-archived" onclick="toggleDeletedPanel()">已删除</button>
+        <button id="btn-toggle-archived" class="toggle-archived" onclick="toggleShowArchived()">显示归档</button>
+      </div>
+    </div>
+  </header>
+  <div id="settings-overlay" class="overlay" onclick="if(event.target===this)closeAutoDeleteSettings()">
+    <div class="panel" onclick="event.stopPropagation()">
+      <div class="panel-body" id="settings-box"></div>
+    </div>
+  </div>
+  <div id="deleted-overlay" class="overlay" onclick="if(event.target===this)toggleDeletedPanel()">
+    <div class="panel" onclick="event.stopPropagation()">
+      <div class="panel-head">
+        <div class="row" style="gap:10px">
+          <div class="badge">已删除</div>
+          <div class="mono">软删：可随时恢复</div>
+        </div>
+        <div class="row">
+          <button class="toggle-archived" onclick="refreshDeletedList(true).then(() => renderDeletedPanel())">刷新</button>
+          <button class="toggle-archived" onclick="toggleDeletedPanel()">关闭</button>
+        </div>
+      </div>
+      <div id="deleted-list" class="panel-body"></div>
+    </div>
+  </div>
+  <div id="grid"></div>
+</body>
+</html>
