@@ -6,13 +6,28 @@ A real-time web dashboard for monitoring [OpenClaw](https://openclaw.ai) agent s
 
 - [OpenClaw](https://openclaw.ai) installed and running (`openclaw gateway start`)
 - Node.js ≥ 18
+- Git
 
-## Quick Start
+## One-line Install
+
+**Mac / Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/wuchengfeng/agent-monitor/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/wuchengfeng/agent-monitor/main/install.ps1 | iex
+```
+
+Installs to `~/.openclaw-agent-monitor`, starts the server, and opens your browser automatically. Run the same command again to update.
+
+## Manual Start
 
 ```bash
-git clone <this-repo>
-cd openclaw-agent-monitor
-npm start
+git clone https://github.com/wuchengfeng/agent-monitor.git
+cd agent-monitor
+node server.js
 ```
 
 Open **http://localhost:4000** in your browser.
