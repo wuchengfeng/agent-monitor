@@ -54,7 +54,6 @@
     <h1 id="title">OpenClaw Timeline</h1>
     <div class="controls">
       <button onclick="location.href='/'">返回看板</button>
-      <button id="btn-autoscroll" class="active" onclick="toggleAutoScroll()">自动滚动: ON</button>
       <button onclick="clearTimeline()">清空</button>
     </div>
   </header>
@@ -62,7 +61,6 @@
 
   <script>
     const timeline = document.getElementById('timeline');
-    let autoScroll = true;
     const processedIds = new Set();
     const eventById = new Map();
     const params = new URLSearchParams(location.search);
@@ -76,13 +74,6 @@
     if (sid && agent) titleEl.textContent = `Agent ${displayAgentName(agent)} / Session ${sid}`;
     if (sid && !agent) titleEl.textContent = `Session Timeline: ${sid}`;
     if (!sid && agent) titleEl.textContent = `Agent Timeline: ${displayAgentName(agent)}`;
-    
-    function toggleAutoScroll() {
-      autoScroll = !autoScroll;
-      const btn = document.getElementById('btn-autoscroll');
-      btn.textContent = `自动滚动: ${autoScroll ? 'ON' : 'OFF'}`;
-      btn.className = autoScroll ? 'active' : '';
-    }
     
     function clearTimeline() {
       timeline.innerHTML = '';
@@ -275,13 +266,8 @@
       
       div.innerHTML = metaHtml + contentHtml;
       
-      // Insert based on timestamp (though usually appended)
-      // Simple append for log view
-      timeline.appendChild(div);
-      
-      if (autoScroll) {
-        timeline.scrollTop = timeline.scrollHeight;
-      }
+      // 最新消息插到最顶部
+      timeline.prepend(div);
     }
 
     async function loadSnapshot() {
