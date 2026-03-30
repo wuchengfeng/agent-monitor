@@ -16,6 +16,7 @@ const fileOffsets = new Map();
 const fileBuffers = new Map();
 
 const MONITOR_SETTINGS_FILE = path.join(BASE_ROOT, 'agent-monitor', 'monitor_settings.json');
+const CHANNEL_NICKNAMES_FILE = path.join(BASE_ROOT, 'agent-monitor', 'channel_nicknames.json');
 
 // --- Heartbeat Scheduler Logic ---
 const HEARTBEAT_SCHEDULE_FILE = path.join(BASE_ROOT, 'agent-monitor', 'heartbeat_schedule.json');
@@ -220,16 +221,19 @@ function parseLine(line, sessionId, agentId) {
   try {
     const obj = JSON.parse(line);
     const ts = obj.timestamp || Date.now();
+    const type = obj.type || null;
+    const customType = obj.customType || null;
+    const customData = obj.data || null;
     const m = obj.message || {};
     const role = m.role || null;
     const contentArr = Array.isArray(m.content) ? m.content : [];
     // 提取 toolCalls
     const toolCalls = contentArr.filter((c) => c && c.type === 'toolCall');
-    
+
     // 提取 textPreview
     const texts = contentArr.filter((c) => c && c.type === 'text').map((t) => t.text).join(' ');
     const textPreview = texts;
-    
+
     // 构造更详细的工具调用信息
     const toolCallDetails = toolCalls.map(tool => {
       return {
@@ -242,27 +246,48 @@ function parseLine(line, sessionId, agentId) {
     // 如果是 sessions_spawn，提取 task 信息以便在前端展示
     const toolArgs = toolCallDetails.length ? toolCallDetails.map(t => {
       if (t.name === 'sessions_spawn' && t.args && t.args.task) {
-        return `[Spawn Task] ${t.args.task.substring(0, 200)}...`; 
+        return `[Spawn Task] ${t.args.task.substring(0, 200)}...`;
       }
       return JSON.stringify(t.args);
     }).join('; ') : null;
 
-    const errorMessage = m.errorMessage || obj.errorMessage || null;
-    const provider = obj.provider || m.provider || null;
-    const model = obj.model || m.model || null;
+    let errorMessage = m.errorMessage || obj.errorMessage || null;
+    let provider = obj.provider || m.provider || null;
+    let model = obj.model || m.model || null;
+
+    // 从 custom 事件的 data 字段提取信息
+    if (type === 'custom' && customData) {
+      if (!provider) provider = customData.provider || null;
+      if (!model) model = customData.modelId || customData.model || null;
+      if (customType === 'openclaw:prompt-error' && !errorMessage) {
+        errorMessage = customData.error || null;
+      }
+    }
+
     const stopReason = obj.stopReason || m.stopReason || null;
     const msgId = obj.id || m.id || null;
     const usage = m.usage || null;
-    
+    const api = m.api || null;
+    // toolResult 特有字段
+    const isError = m.isError || null;
+    const details = m.details || null;
+    // thinking_level_change 事件
+    const thinkingLevel = obj.thinkingLevel || null;
+    // session 事件
+    const cwd = obj.cwd || null;
+
     // For detailed timeline: pass through the full content and specific tool result info
     const fullContent = contentArr;
     const resultToolName = m.toolName || null;
     const resultToolId = m.toolCallId || null;
-    
+
     return {
       sessionId,
       agentId,
       ts,
+      type,
+      customType,
+      customData,
       role,
       textPreview,
       toolName,
@@ -275,7 +300,12 @@ function parseLine(line, sessionId, agentId) {
       usage,
       fullContent,
       resultToolName,
-      resultToolId
+      resultToolId,
+      api,
+      isError,
+      details,
+      thinkingLevel,
+      cwd,
     };
   } catch {
     return null;
@@ -735,6 +765,91 @@ const server = http.createServer(async (req, res) => {
     });
     return;
   }
+  if (parsed.pathname === '/api/channel-nicknames') {
+    if (req.method === 'GET') {
+      const nicknames = readJson(CHANNEL_NICKNAMES_FILE) || {};
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify(nicknames));
+      return;
+    }
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { key, nickname } = JSON.parse(body);
+          if (typeof key !== 'string' || !key) throw new Error('missing key');
+          const nicknames = readJson(CHANNEL_NICKNAMES_FILE) || {};
+          if (nickname == null || String(nickname).trim() === '') {
+            delete nicknames[key];
+          } else {
+            nicknames[key] = String(nickname).trim();
+          }
+          if (!writeJson(CHANNEL_NICKNAMES_FILE, nicknames)) throw new Error('write failed');
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify({ ok: true, nicknames }));
+        } catch (e) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: String(e && e.message || e) }));
+        }
+      });
+      return;
+    }
+    res.statusCode = 405;
+    res.end('Method not allowed');
+    return;
+  }
+
+  if (parsed.pathname === '/api/channels') {
+    // 读取各 agent 的 sessions.json，解析通道/发送者元数据
+    const agentIds = listAgentIds();
+    const channels = [];
+    for (const agentId of agentIds) {
+      const sessionsJsonPath = path.join(getAgentSessionsDir(agentId), 'sessions.json');
+      const sessionsJson = readJson(sessionsJsonPath);
+      if (!sessionsJson || typeof sessionsJson !== 'object') continue;
+      for (const [sessionKey, meta] of Object.entries(sessionsJson)) {
+        if (!meta || typeof meta !== 'object') continue;
+        const sessionId = meta.sessionId || null;
+        const updatedAt = meta.updatedAt || null;
+        const origin = meta.origin || {};
+        const deliveryContext = meta.deliveryContext || {};
+        // 从 key 解析通道信息: agent:{agentId}:{channel}:{chatType}:{senderId}
+        let channel = null, chatType = null, senderId = null;
+        const keyParts = sessionKey.split(':');
+        // keyParts[0]="agent", keyParts[1]=agentId, keyParts[2]=channel, keyParts[3]=chatType, keyParts[4..]=senderId
+        if (keyParts.length >= 5) {
+          channel = keyParts[2];
+          chatType = keyParts[3];
+          senderId = keyParts.slice(4).join(':');
+        } else {
+          // agent:main:main 或类似格式
+          channel = origin.surface || origin.provider || deliveryContext.channel || keyParts[2] || null;
+          chatType = origin.chatType || deliveryContext.chatType || null;
+          const rawFrom = origin.from || deliveryContext.to || null;
+          senderId = rawFrom ? rawFrom.replace(/^[a-z]+:/, '') : null;
+        }
+        const accountId = deliveryContext.accountId || origin.accountId || null;
+        const senderLabel = origin.label || senderId || null;
+        channels.push({
+          agentId,
+          sessionKey,
+          sessionId,
+          channel: channel || 'unknown',
+          chatType: chatType || 'unknown',
+          senderId: senderId || 'unknown',
+          senderLabel: senderLabel || senderId || 'unknown',
+          accountId,
+          updatedAt,
+        });
+      }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ channels }));
+    return;
+  }
+
   if (parsed.pathname === '/snapshot') {
     const limit = parsed.query && parsed.query.limit ? parseInt(parsed.query.limit, 10) : 30;
     const data = await collectSnapshot(limit);

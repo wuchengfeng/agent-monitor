@@ -83,6 +83,11 @@
     // 归档 Set
     const archived = new Set(JSON.parse(localStorage.getItem('agent_monitor_archived') || '[]'));
     let showArchived = false;
+    // 频道视图
+    let channelViewActive = false;
+    let channelData = []; // [{ agentId, sessionKey, sessionId, channel, chatType, senderId, senderLabel, accountId, updatedAt }]
+    let channelNicknames = {}; // { "feishu:direct:ou_xxx": "峰哥", ... }
+    let editingNicknameKey = null; // 当前正在编辑备注的 key
     const expandedSessions = new Set(); // 用于记录展开了详情的 sessionId
     const selectedStepIndexBySession = new Map();
     const selectedApiIndexBySession = new Map();
@@ -593,11 +598,23 @@
       // 构建 interaction 对象
       let iType = 'Info';
       let iContent = '';
-      
+
       const isToolResult = e.role === 'toolResult' || e.resultToolName || e.resultToolId;
       const text = e.textPreview || '';
 
-      if (e.toolName) {
+      if (e.type === 'thinking_level_change') {
+        iType = 'ThinkingChange';
+        iContent = `thinking: ${e.thinkingLevel || 'unknown'}`;
+      } else if (e.type === 'session') {
+        iType = 'Session';
+        iContent = `cwd: ${e.cwd || 'unknown'}`;
+      } else if (e.type === 'custom' && e.customType === 'model-snapshot') {
+        iType = 'ModelSwitch';
+        iContent = `${e.provider || ''}/${e.model || ''}`;
+      } else if (e.type === 'custom' && e.customType === 'openclaw:prompt-error') {
+        iType = 'Error';
+        iContent = `Error: ${e.errorMessage || 'unknown'}`;
+      } else if (e.toolName) {
         iType = 'ToolCall';
         iContent = `Call: ${e.toolName}`;
       } else if (isToolResult) {
@@ -616,11 +633,11 @@
         iType = 'Info';
         iContent = text;
       }
-      
+
       // 简单的去重指纹
       const fingerprint = `${e.ts}_${iType}_${iContent}`;
       const exists = interactions.some(item => `${item.ts}_${item.type}_${item.content}` === fingerprint);
-      
+
       if (!exists && iContent) {
         interactions.push({
           ts: e.ts,
@@ -638,7 +655,12 @@
           errorMessage: e.errorMessage,
           msgId: e.msgId,
           textPreview: text,
-          fullContent: e.fullContent
+          fullContent: e.fullContent,
+          api: e.api,
+          isError: e.isError,
+          details: e.details,
+          thinkingLevel: e.thinkingLevel,
+          cwd: e.cwd,
         });
         
         // 排序
@@ -663,6 +685,19 @@
       render();
     }
     
+    function getContextWindow(model) {
+      const m = String(model || '').toLowerCase();
+      // 已知超大上下文模型
+      if (m.includes('claude-opus-4') || m.includes('claude-sonnet-4') || m.includes('claude-haiku-4')) return 1280000;
+      if (m.includes('gemini-1.5') || m.includes('gemini-2')) return 1000000;
+      if (m.includes('gpt-5') || m.includes('gpt-4o') || m.includes('gpt-4-turbo')) return 128000;
+      if (m.includes('claude-3-5') || m.includes('claude-3.5')) return 200000;
+      if (m.includes('claude-3')) return 200000;
+      if (m.includes('deepseek')) return 128000;
+      // 默认：200K
+      return 200000;
+    }
+
     function renderStepPane(key, interactions, isFullscreen){
       const steps = Array.isArray(interactions) ? interactions : [];
       const max = isFullscreen ? 10 : 7;
@@ -673,11 +708,14 @@
         if (typeof snippet !== 'string') snippet = JSON.stringify(snippet);
         snippet = snippet.replace(/\s+/g, ' ').trim();
         if (snippet.length > 80) snippet = snippet.slice(0, 80) + '…';
+        const errStyle = i.isError ? 'background:rgba(200,50,50,.12);' : '';
+        const errDot = i.isError ? '<span style="color:#f15e5e;margin-right:4px">✕</span>' : '';
+        const dur = i.details?.durationMs != null ? `<span style="color:#7aa2d5;font-family:ui-monospace,monospace">${i.details.durationMs}ms</span>` : '-';
         return `
-          <div class="list-row ${idx===sel?'selected':''}" onclick="selectStep('${key}', ${idx})">
+          <div class="list-row ${idx===sel?'selected':''}" style="${errStyle}" onclick="selectStep('${key}', ${idx})">
             <div class="cell-time">${fmtTimeHms(i.ts)}</div>
-            <div class="cell-type">${escHtml(i.type || '-')}</div>
-            <div class="cell-tokens">-</div>
+            <div class="cell-type">${errDot}${escHtml(i.type || '-')}</div>
+            <div class="cell-tokens">${dur}</div>
             <div class="cell-snippet" title="${escHtml(i.textPreview || i.content || '')}">${escHtml(snippet || '-')}</div>
           </div>
         `;
@@ -695,12 +733,27 @@
         const toolBlock = toolCalls.length
           ? toolCalls.map(tc => `<div class="detail-box" style="color:#e6eef8;max-height:220px;overflow:auto"><b>${escHtml(tc.name)}</b>\n${escHtml(tryPrettyJson(tc.arguments))}</div>`).join('')
           : '';
+        const errBadge = selectedStep.isError ? `<span class="badge" style="background:rgba(200,50,50,.2);border-color:#f15e5e;color:#ffb4b4">isError</span>` : '';
+        const detailsMeta = selectedStep.details ? (() => {
+          const d = selectedStep.details;
+          const parts = [];
+          if (d.exitCode != null) parts.push(`exitCode: ${d.exitCode}`);
+          if (d.durationMs != null) parts.push(`duration: ${d.durationMs}ms`);
+          if (d.status) parts.push(`status: ${d.status}`);
+          return parts.length ? `<div class="detail-meta">${parts.map(p=>`<span>${escHtml(p)}</span>`).join('')}</div>` : '';
+        })() : '';
+        const cwdBadge = selectedStep.cwd ? `<span class="badge" title="${escHtml(selectedStep.cwd)}">cwd: ${escHtml(selectedStep.cwd.split('/').slice(-2).join('/'))}</span>` : '';
+        const thinkBadge = selectedStep.thinkingLevel != null ? `<span class="badge">thinking: ${escHtml(selectedStep.thinkingLevel)}</span>` : '';
         stepDetailHtml = `
           <div class="detail-title">
             <span class="badge">${escHtml(selectedStep.type||'-')}</span>
             <span class="ts">${fmtTs(selectedStep.ts)}</span>
             ${selectedStep.resultToolName ? `<span class="badge">${escHtml(selectedStep.resultToolName)}</span>` : ''}
+            ${errBadge}
+            ${cwdBadge}
+            ${thinkBadge}
           </div>
+          ${detailsMeta}
           ${textBlock}
           ${toolBlock}
         `;
@@ -724,7 +777,7 @@
       const latestApiCall = interactions.find(i => i && i.role === 'assistant' && i.usage);
       const latestUsage = latestApiCall?.usage || null;
       const ctxLen = latestUsage ? (latestUsage.input||0) + (latestUsage.cacheRead||0) + (latestUsage.cacheWrite||0) : 0;
-      const ctxWindow = 128000;
+      const ctxWindow = getContextWindow(s.model || '');
       const pct = Math.min(Math.round((ctxLen / ctxWindow) * 100), 200);
       const pctLabel = `${pct}%`;
       const healthColor = pct <= 50 ? '#35c46a' : (pct <= 75 ? '#edb232' : (pct <= 90 ? '#f15e5e' : '#d66bff'));
@@ -751,7 +804,7 @@
               <div class="health-head">
                 <span class="badge">上下文</span>
                 <span class="mono">${escHtml(pctLabel)}</span>
-                <span class="mono">${escHtml(totalHuman)} / 128K</span>
+                <span class="mono">${escHtml(totalHuman)} / ${fmtCompact(ctxWindow)}</span>
               </div>
               <div class="health-bar">
                 <div class="health-fill" style="width:${pct}%;background:${healthColor}"></div>
@@ -828,11 +881,18 @@
           ? `<div class="detail-box" style="color:#e6eef8;max-height:220px;overflow:auto">${escHtml(outText)}</div>`
           : `<div class="detail-box" style="color:#5c6b7f;font-style:italic;max-height:220px;overflow:auto">当前步骤没有消息</div>`;
 
+        const costInfo = selected.usage?.cost ? (() => {
+          const c = selected.usage.cost;
+          const total = (c.input||0) + (c.output||0) + (c.cacheRead||0) + (c.cacheWrite||0);
+          return total > 0 ? `$${total.toFixed(4)} (in:$${(c.input||0).toFixed(4)} out:$${(c.output||0).toFixed(4)})` : null;
+        })() : null;
+        const apiLabel = selected.api ? `<span class="badge">${escHtml(selected.api)}</span>` : '';
         detailHtml = `
           <div class="detail-title">
             <span class="badge">命令: Bot</span>
             ${provider ? `<span class="badge">${escHtml(provider)}</span>` : ''}
             ${modelTag}
+            ${apiLabel}
           </div>
           <div class="detail-meta">
             <span>时间: ${escHtml(fmtTs(selected.ts))}</span>
@@ -840,6 +900,7 @@
             ${(tokenCacheR > 0 || tokenCacheW > 0) ? `<span style="color:#7a90a8">缓存读/写: ${tokenCacheR.toLocaleString()}/${tokenCacheW.toLocaleString()}</span>` : ''}
             ${stop ? `<span>${escHtml(stop)}</span>` : ''}
             ${err ? `<span style="color:#ffb4b4">${escHtml(err)}</span>` : ''}
+            ${costInfo ? `<span style="color:#a5d6a7">费用: ${escHtml(costInfo)}</span>` : ''}
           </div>
           <div class="row" style="gap:8px;margin-top:10px">
             <div class="badge">入参</div>
@@ -870,6 +931,12 @@
     }
     
     function render(){
+      if (channelViewActive) {
+        // 用户正在编辑备注时，跳过自动重渲（防止 input 失去焦点）
+        if (editingNicknameKey) return;
+        renderChannels();
+        return;
+      }
       const grid=document.getElementById('grid');
       // Save scroll positions before wiping DOM
       const scrollMap = new Map();
@@ -975,6 +1042,216 @@
         if (saved !== undefined) el.scrollTop = saved;
       });
     }
+    async function loadNicknames() {
+      try {
+        const r = await fetch('/api/channel-nicknames', { cache: 'no-store' });
+        if (r.ok) channelNicknames = await r.json();
+      } catch {}
+    }
+
+    function nicknameKey(channel, chatType, senderId) {
+      return `${channel}:${chatType}:${senderId}`;
+    }
+
+    function getNickname(channel, chatType, senderId) {
+      return channelNicknames[nicknameKey(channel, chatType, senderId)] || null;
+    }
+
+    async function saveNickname(channel, chatType, senderId, nickname) {
+      const key = nicknameKey(channel, chatType, senderId);
+      try {
+        const r = await fetch('/api/channel-nicknames', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key, nickname }),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || r.statusText);
+        channelNicknames = j.nicknames;
+        editingNicknameKey = null;
+        render();
+      } catch (e) {
+        alert(`保存失败：${String(e && e.message || e)}`);
+      }
+    }
+
+    function startEditNickname(channel, chatType, senderId) {
+      editingNicknameKey = nicknameKey(channel, chatType, senderId);
+      renderChannels(); // 直接调 renderChannels，绕过 editingNicknameKey 的 guard
+      // Focus the input after render
+      requestAnimationFrame(() => {
+        const el = document.getElementById('active-nickname-input');
+        if (el) { el.focus(); el.select(); }
+      });
+    }
+
+    function cancelEditNickname() {
+      editingNicknameKey = null;
+      render();
+    }
+
+    function toggleChannelView() {
+      channelViewActive = !channelViewActive;
+      const btn = document.getElementById('btn-channel-view');
+      if (btn) btn.textContent = channelViewActive ? '会话视图' : '频道视图';
+      render();
+    }
+
+    async function pollChannels() {
+      try {
+        const r = await fetch('/api/channels', { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (Array.isArray(j.channels)) channelData = j.channels;
+        if (channelViewActive && !editingNicknameKey) render();
+      } catch {}
+    }
+
+    function channelIcon(channel) {
+      const c = String(channel || '').toLowerCase();
+      if (c === 'feishu' || c === 'lark') return '🪶';
+      if (c === 'telegram') return '✈';
+      if (c === 'slack') return '💬';
+      if (c === 'discord') return '🎮';
+      if (c === 'wechat') return '💚';
+      if (c === 'heartbeat') return '💓';
+      return '📡';
+    }
+
+    function renderChannels() {
+      const grid = document.getElementById('grid');
+      // Save scroll
+      const scrollMap = new Map();
+      grid.querySelectorAll('[data-scroll-id]').forEach(el => scrollMap.set(el.dataset.scrollId, el.scrollTop));
+      grid.innerHTML = '';
+
+      if (!channelData.length) {
+        grid.innerHTML = '<div class="mono" style="padding:20px">暂无频道数据，等待 sessions.json 加载…</div>';
+        return;
+      }
+
+      // 按 agentId → channel 分组
+      const byAgent = new Map();
+      for (const entry of channelData) {
+        const aid = entry.agentId || 'main';
+        if (!byAgent.has(aid)) byAgent.set(aid, new Map());
+        const byChannel = byAgent.get(aid);
+        const ch = entry.channel || 'unknown';
+        if (!byChannel.has(ch)) byChannel.set(ch, []);
+        byChannel.get(ch).push(entry);
+      }
+
+      for (const [agentId, byChannel] of byAgent) {
+        const agentBlock = document.createElement('div');
+        agentBlock.className = 'agent-block';
+        agentBlock.innerHTML = `
+          <div class="agent-head">
+            <div class="badge">Agent</div>
+            <div class="mono">${escHtml(agentId)}</div>
+            <div class="badge">频道数</div>
+            <div class="mono">${byChannel.size}</div>
+          </div>
+        `;
+
+        for (const [channel, entries] of byChannel) {
+          const icon = channelIcon(channel);
+          const chBlock = document.createElement('div');
+          chBlock.style.cssText = 'border:1px solid #1c2834;border-radius:8px;background:#0b0f14;padding:10px;margin-top:8px';
+
+          const chHead = document.createElement('div');
+          chHead.className = 'row';
+          chHead.style.cssText = 'gap:10px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #1c2834';
+          chHead.innerHTML = `
+            <span style="font-size:16px">${escHtml(icon)}</span>
+            <span class="title">${escHtml(channel)}</span>
+            <span class="badge">${entries.length} 个对话者</span>
+          `;
+          chBlock.appendChild(chHead);
+
+          // 每个 sender 一行
+          for (const entry of entries) {
+            const { sessionId, chatType, senderId, senderLabel, accountId, updatedAt, sessionKey } = entry;
+            // 从 state 取实时数据
+            const stateKey = makeKey(agentId, sessionId || '');
+            const live = sessionId ? state.get(stateKey) : null;
+            const lastTs = live ? (live.lastTs || updatedAt) : updatedAt;
+            const lastMsg = live ? (
+              live.textPreview
+                ? String(live.textPreview).replace(/\s+/g, ' ').trim().slice(0, 80)
+                : (live.toolName ? `工具: ${live.toolName}` : '')
+            ) : '';
+            const tokens = live?.totalTokens ? fmtCompact((live.totalTokens.input||0)+(live.totalTokens.output||0)) : '-';
+            const isActive = live && live.updatedAt && (Date.now() - live.updatedAt < 8000);
+            const activeDot = isActive ? '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#35c46a;margin-right:6px"></span>' : '';
+
+            // chatType badge 颜色
+            const chatTypeBadge = chatType === 'direct'
+              ? `<span class="badge" style="border-color:#234a86;background:rgba(58,120,255,.12);color:#a9c7ff">${escHtml(chatType)}</span>`
+              : `<span class="badge" style="border-color:#3a5a3a;background:rgba(76,175,80,.12);color:#a5d6a7">${escHtml(chatType)}</span>`;
+
+            const nickname = getNickname(channel, chatType, senderId);
+            const nkKey = nicknameKey(channel, chatType, senderId);
+            const isEditingNk = editingNicknameKey === nkKey;
+            const displayName = nickname || senderLabel || senderId;
+            const rawId = senderLabel || senderId;
+
+            let senderCell;
+            if (isEditingNk) {
+              senderCell = `
+                <div class="row" style="gap:4px;min-width:0;flex-wrap:nowrap">
+                  ${activeDot}
+                  <input id="active-nickname-input"
+                    type="text"
+                    value="${escHtml(nickname || '')}"
+                    placeholder="${escHtml(rawId)}"
+                    style="flex:1;min-width:0;background:#0b0f14;border:1px solid #3a78ff;color:#e6eef8;border-radius:4px;padding:2px 6px;font-size:12px;font-family:inherit"
+                    onkeydown="if(event.key==='Enter'){saveNickname('${escHtml(channel)}','${escHtml(chatType)}','${escHtml(senderId)}',this.value)}else if(event.key==='Escape'){cancelEditNickname()}"
+                  />
+                  <button class="btn-link" style="padding:2px 6px" onclick="saveNickname('${escHtml(channel)}','${escHtml(chatType)}','${escHtml(senderId)}',document.getElementById('active-nickname-input').value)">✓</button>
+                  <button class="btn-archive" style="padding:2px 6px" onclick="cancelEditNickname()">✕</button>
+                </div>`;
+            } else {
+              senderCell = `
+                <div class="row" style="gap:6px;min-width:0;flex-wrap:nowrap">
+                  ${activeDot}
+                  <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${nickname ? 'color:#cfe3ff;font-weight:600' : ''}" title="${escHtml(rawId)}">${escHtml(displayName)}</span>
+                  ${nickname ? `<span class="mono" style="color:#5c6b7f;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(rawId)}">${escHtml(rawId.length > 12 ? rawId.slice(0,12)+'…' : rawId)}</span>` : ''}
+                  <button class="btn-archive" style="padding:1px 5px;font-size:11px;flex-shrink:0" title="编辑备注" onclick="startEditNickname('${escHtml(channel)}','${escHtml(chatType)}','${escHtml(senderId)}')">✏</button>
+                </div>`;
+            }
+
+            const row = document.createElement('div');
+            row.style.cssText = 'display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) minmax(0,3fr) minmax(0,1fr) auto;gap:10px;align-items:center;padding:8px 6px;border-bottom:1px dashed #1c2834;font-size:12px';
+            row.innerHTML = `
+              ${senderCell}
+              <div class="row" style="gap:6px">
+                ${chatTypeBadge}
+                ${accountId && accountId !== 'default' ? `<span class="badge">${escHtml(accountId)}</span>` : ''}
+              </div>
+              <div class="cell-snippet" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(lastMsg)}">${escHtml(lastMsg || '—')}</div>
+              <div class="row" style="gap:6px">
+                <span class="badge" title="总 token">${tokens}</span>
+                <span class="ts">${lastTs ? fmtTs(lastTs) : '-'}</span>
+              </div>
+              <div class="row" style="gap:6px">
+                ${sessionId ? `<button class="btn-link" onclick="location.href='/activity?agent=${encodeURIComponent(agentId)}&sid=${encodeURIComponent(sessionId)}'">历史</button>` : ''}
+                ${sessionId ? `<button class="btn-copy" onclick="copySessionDetail('${escHtml(makeKey(agentId, sessionId))}')">复制</button>` : ''}
+              </div>
+            `;
+            chBlock.appendChild(row);
+          }
+          agentBlock.appendChild(chBlock);
+        }
+        grid.appendChild(agentBlock);
+      }
+
+      // Restore scroll
+      grid.querySelectorAll('[data-scroll-id]').forEach(el => {
+        const saved = scrollMap.get(el.dataset.scrollId);
+        if (saved !== undefined) el.scrollTop = saved;
+      });
+    }
+
     async function pollSnapshot(){
       try{
         const r=await fetch('/snapshot',{cache:'no-store'});
@@ -1030,6 +1307,10 @@
       // 立即拉取一次快照，保证首次加载有数据
       pollSnapshot();
       setInterval(pollSnapshot, 4000);
+      // 频道数据 + 备注轮询
+      pollChannels();
+      setInterval(pollChannels, 5000);
+      loadNicknames();
       refreshDeletedList(true).then(() => render());
       setInterval(() => refreshDeletedList(false).then(() => render()), 5000);
       // 同时尝试建立 SSE（若不可用则忽略，由快照兜底）
@@ -1048,6 +1329,7 @@
       <div class="row">
         <a href="/heartbeat.html" class="toggle-archived" style="text-decoration:none">Heartbeat Scheduler</a>
         <button class="toggle-archived" onclick="location.href='/activity'">详细时间轴 (Activity)</button>
+        <button id="btn-channel-view" class="toggle-archived" onclick="toggleChannelView()">频道视图</button>
         <button class="toggle-archived" onclick="openAutoDeleteSettings()">自动软删设置</button>
         <button id="btn-toggle-deleted" class="toggle-archived" onclick="toggleDeletedPanel()">已删除</button>
         <button id="btn-toggle-archived" class="toggle-archived" onclick="toggleShowArchived()">显示归档</button>
