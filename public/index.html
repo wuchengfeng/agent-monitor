@@ -930,7 +930,16 @@
       `;
     }
     
+    let _renderScheduled = false;
     function render(){
+      if (_renderScheduled) return;
+      _renderScheduled = true;
+      requestAnimationFrame(() => {
+        _renderScheduled = false;
+        _doRender();
+      });
+    }
+    function _doRender(){
       if (channelViewActive) {
         // 用户正在编辑备注时，跳过自动重渲（防止 input 失去焦点）
         if (editingNicknameKey) return;
