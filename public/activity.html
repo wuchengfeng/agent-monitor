@@ -83,7 +83,9 @@
     function fmtTs(ts) {
       try {
         const d = new Date(typeof ts === 'number' ? ts : Date.parse(ts));
-        return d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+        const date = `${d.getMonth()+1}-${String(d.getDate()).padStart(2,'0')}`;
+        const time = d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+        return `${date} ${time}`;
       } catch { return String(ts); }
     }
     

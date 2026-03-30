@@ -123,7 +123,7 @@
       render();
     }
 
-    function fmtTs(ts){try{const d=new Date(typeof ts==='number'?ts:Date.parse(ts));return d.toLocaleTimeString()}catch{return String(ts)}}
+    function fmtTs(ts){try{const d=new Date(typeof ts==='number'?ts:Date.parse(ts));const date=`${d.getMonth()+1}-${String(d.getDate()).padStart(2,'0')}`;return `${date} ${d.toLocaleTimeString()}`}catch{return String(ts)}}
     function fmtTimeHms(ts){
       try{
         const d=new Date(typeof ts==='number'?ts:Date.parse(ts));
