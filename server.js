@@ -14,6 +14,9 @@ const defaultAgentId = 'main';
 const clients = new Set();
 const fileOffsets = new Map();
 const fileBuffers = new Map();
+// token 统计缓存：filePath -> { size, input, output }
+// 文件大小不变时直接复用，避免每次全量重解析
+const statsCache = new Map();
 
 const MONITOR_SETTINGS_FILE = path.join(BASE_ROOT, 'agent-monitor', 'monitor_settings.json');
 const CHANNEL_NICKNAMES_FILE = path.join(BASE_ROOT, 'agent-monitor', 'channel_nicknames.json');
@@ -438,29 +441,42 @@ function collectSnapshot(maxLinesPerFile = 30) {
         let pendingFiles = jsonl.length;
         jsonl.forEach((f) => {
           const fp = path.join(dir, f);
-          fs.readFile(fp, 'utf8', (e, data) => {
-            if (!e && data) {
-              const allLines = data.trim().split('\n');
+          fs.stat(fp, (statErr, st) => {
+            const fileSize = statErr ? -1 : st.size;
+            const cached = statsCache.get(fp);
+            if (cached && cached.size === fileSize) {
+              // 文件大小未变，直接复用缓存的 token 统计和尾部行
               const sessionId = path.basename(fp, '.jsonl');
-              let totalInput = 0;
-              let totalOutput = 0;
-              for (const line of allLines) {
-                const ev = parseLine(line, sessionId, agentId);
-                if (ev && ev.usage) {
-                  totalInput += (ev.usage.input || 0);
-                  totalOutput += (ev.usage.output || 0);
+              outStats[agentId][sessionId] = { input: cached.input, output: cached.output };
+              for (const ev of cached.tail) outItems.push(ev);
+              if (--pendingFiles === 0) {
+                if (--pendingAgents === 0) finalize();
+              }
+              return;
+            }
+            fs.readFile(fp, 'utf8', (e, data) => {
+              if (!e && data) {
+                const allLines = data.trim().split('\n');
+                const sessionId = path.basename(fp, '.jsonl');
+                let totalInput = 0;
+                let totalOutput = 0;
+                for (const line of allLines) {
+                  const ev = parseLine(line, sessionId, agentId);
+                  if (ev && ev.usage) {
+                    totalInput += (ev.usage.input || 0);
+                    totalOutput += (ev.usage.output || 0);
+                  }
                 }
+                outStats[agentId][sessionId] = { input: totalInput, output: totalOutput };
+                const tailLines = allLines.slice(-maxLinesPerFile);
+                const tailEvents = tailLines.map(l => parseLine(l, sessionId, agentId)).filter(Boolean);
+                statsCache.set(fp, { size: fileSize, input: totalInput, output: totalOutput, tail: tailEvents });
+                for (const ev of tailEvents) outItems.push(ev);
               }
-              outStats[agentId][sessionId] = { input: totalInput, output: totalOutput };
-              const tail = allLines.slice(-maxLinesPerFile);
-              for (const line of tail) {
-                const ev = parseLine(line, sessionId, agentId);
-                if (ev) outItems.push(ev);
+              if (--pendingFiles === 0) {
+                if (--pendingAgents === 0) finalize();
               }
-            }
-            if (--pendingFiles === 0) {
-              if (--pendingAgents === 0) finalize();
-            }
+            });
           });
         });
       });

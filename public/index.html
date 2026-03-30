@@ -1315,7 +1315,7 @@
     window.addEventListener('DOMContentLoaded',()=>{
       // 立即拉取一次快照，保证首次加载有数据
       pollSnapshot();
-      setInterval(pollSnapshot, 4000);
+      setInterval(pollSnapshot, 15000);
       // 频道数据 + 备注轮询
       pollChannels();
       setInterval(pollChannels, 5000);
@@ -1326,7 +1326,7 @@
       const es=new EventSource('/events');
       es.onmessage=(ev)=>{try{const e=JSON.parse(ev.data);upsert(e, false)}catch{}};
       es.onerror=()=>{};
-      setInterval(render,2000);
+
       window.addEventListener('resize', ()=>render());
     });
   </script>
