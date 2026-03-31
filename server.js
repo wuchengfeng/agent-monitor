@@ -520,6 +520,133 @@ function collectSessionHistory(sessionId, agentId = defaultAgentId, maxLines = 2
   });
 }
 
+function computeTimingChain(items, recentTurns) {
+  // Only process message events, sorted chronologically
+  const messages = items.filter(e => e.type === 'message').sort((a, b) => {
+    const ta = typeof a.ts === 'number' ? a.ts : new Date(a.ts).getTime();
+    const tb = typeof b.ts === 'number' ? b.ts : new Date(b.ts).getTime();
+    return ta - tb;
+  });
+
+  const turns = [];
+  let currentTurn = null;
+  let prevTs = null;
+
+  function tsMs(ts) {
+    if (typeof ts === 'number') return ts > 1e12 ? ts : ts; // already ms
+    return new Date(ts).getTime();
+  }
+
+  for (const evt of messages) {
+    const evtMs = tsMs(evt.ts);
+
+    if (evt.role === 'user') {
+      if (currentTurn && currentTurn.phases.length) turns.push(currentTurn);
+      currentTurn = {
+        turnIndex: turns.length,
+        startTs: evtMs,
+        endTs: null,
+        phases: [],
+        llmMs: 0,
+        toolMs: 0,
+        userPreview: safeMessageSlice(evt.textPreview, 120),
+        assistantPreview: '',
+      };
+      prevTs = evtMs;
+      continue;
+    }
+
+    if (!currentTurn) {
+      prevTs = evtMs;
+      continue;
+    }
+
+    if (evt.role === 'assistant') {
+      const llmDur = Math.max(0, evtMs - (prevTs || evtMs));
+      currentTurn.phases.push({
+        type: 'llm',
+        durationMs: llmDur,
+        startTs: prevTs,
+        endTs: evtMs,
+        model: evt.model || null,
+        provider: evt.provider || null,
+        inputTokens: evt.usage ? (evt.usage.input || 0) : 0,
+        outputTokens: evt.usage ? (evt.usage.output || 0) : 0,
+        hasToolCalls: !!evt.toolName,
+        stopReason: evt.stopReason || null,
+      });
+      currentTurn.llmMs += llmDur;
+      if (!evt.toolName) {
+        currentTurn.endTs = evtMs;
+        currentTurn.assistantPreview = safeMessageSlice(evt.textPreview, 120);
+      }
+      prevTs = evtMs;
+    }
+
+    if (evt.role === 'toolResult') {
+      const toolDur = (evt.details && evt.details.durationMs) ? evt.details.durationMs : Math.max(0, evtMs - (prevTs || evtMs));
+      currentTurn.phases.push({
+        type: 'tool',
+        name: evt.resultToolName || 'tool',
+        durationMs: toolDur,
+        startTs: prevTs,
+        endTs: evtMs,
+        status: evt.details ? evt.details.status : null,
+        isError: evt.isError || false,
+      });
+      currentTurn.toolMs += toolDur;
+      prevTs = evtMs;
+    }
+  }
+
+  if (currentTurn && currentTurn.phases.length) turns.push(currentTurn);
+
+  // Compute totalMs per turn
+  for (const turn of turns) {
+    if (!turn.endTs) turn.endTs = turn.phases.length ? turn.phases[turn.phases.length - 1].endTs : turn.startTs;
+    turn.totalMs = turn.endTs - turn.startTs;
+    turn.overheadMs = Math.max(0, turn.totalMs - turn.llmMs - turn.toolMs);
+  }
+
+  // Limit to recent turns if requested
+  const limited = recentTurns && recentTurns > 0 ? turns.slice(-recentTurns) : turns;
+
+  // Compute summary
+  let totalMs = 0, totalLlmMs = 0, totalToolMs = 0;
+  let longestLlm = null, longestTool = null;
+  let llmCount = 0, toolCount = 0;
+  for (const turn of limited) {
+    totalMs += turn.totalMs;
+    totalLlmMs += turn.llmMs;
+    totalToolMs += turn.toolMs;
+    for (const p of turn.phases) {
+      if (p.type === 'llm') {
+        llmCount++;
+        if (!longestLlm || p.durationMs > longestLlm.durationMs) longestLlm = { ...p, turnIndex: turn.turnIndex };
+      } else {
+        toolCount++;
+        if (!longestTool || p.durationMs > longestTool.durationMs) longestTool = { ...p, turnIndex: turn.turnIndex };
+      }
+    }
+  }
+
+  return {
+    turns: limited,
+    summary: {
+      totalTurns: limited.length,
+      totalMs,
+      totalLlmMs,
+      totalToolMs,
+      avgLlmMs: llmCount ? Math.round(totalLlmMs / llmCount) : 0,
+      avgToolMs: toolCount ? Math.round(totalToolMs / toolCount) : 0,
+      llmCalls: llmCount,
+      toolCalls: toolCount,
+      longestLlm,
+      longestTool,
+    },
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
   if (parsed.pathname === '/events') {
@@ -863,6 +990,23 @@ const server = http.createServer(async (req, res) => {
     }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ channels }));
+    return;
+  }
+
+  if (parsed.pathname === '/api/session-timing') {
+    const sessionId = parsed.query && parsed.query.sid ? String(parsed.query.sid) : '';
+    const agentId = parsed.query && parsed.query.agent ? String(parsed.query.agent) : defaultAgentId;
+    if (!isValidSessionId(sessionId)) {
+      res.statusCode = 400;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'invalid sid' }));
+      return;
+    }
+    const recentTurns = parsed.query && parsed.query.recentTurns ? parseInt(parsed.query.recentTurns, 10) : 0;
+    const out = await collectSessionHistory(sessionId, agentId, 20000);
+    const timing = computeTimingChain(out.items, recentTurns);
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ sessionId, agentId, ...timing }));
     return;
   }
 

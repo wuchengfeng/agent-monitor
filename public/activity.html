@@ -42,7 +42,46 @@
     .string { color: #ce9178; }
     .number { color: #b5cea8; }
     .boolean { color: #569cd6; }
-    
+
+    /* Timing Panel */
+    #timing-panel { display: none; flex: 1; overflow-y: auto; padding: 20px; }
+    #timing-panel.active { display: block; }
+    #timeline.hidden { display: none; }
+
+    .timing-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; max-width: 1200px; margin-left: auto; margin-right: auto; }
+    .summary-card { background: #17212b; border-radius: 6px; padding: 14px; }
+    .summary-card .label { font-size: 11px; color: #6c7883; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .summary-card .value { font-size: 22px; font-weight: 700; color: #fff; }
+    .summary-card .sub { font-size: 11px; color: #828a95; margin-top: 4px; }
+    .summary-card .ratio-bar { height: 6px; border-radius: 3px; background: #e88b4d; margin-top: 8px; overflow: hidden; display: flex; }
+    .ratio-bar .llm-part { background: #5288c1; height: 100%; }
+    .ratio-bar .tool-part { background: #e88b4d; height: 100%; }
+    .ratio-bar .overhead-part { background: #444; height: 100%; }
+    .highlight-warn { color: #e88b4d !important; }
+
+    .timing-turn-card { background: #17212b; border-radius: 6px; padding: 12px; margin-bottom: 12px; max-width: 1200px; margin-left: auto; margin-right: auto; }
+    .turn-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 12px; }
+    .turn-label { color: #fff; font-weight: 600; }
+    .turn-stats { color: #828a95; font-size: 11px; }
+    .turn-stats span { margin-left: 10px; }
+    .turn-stats .llm-color { color: #5288c1; }
+    .turn-stats .tool-color { color: #e88b4d; }
+    .turn-preview { font-size: 11px; color: #6c7883; margin-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .waterfall { display: flex; height: 28px; border-radius: 4px; overflow: hidden; background: #0e1621; position: relative; }
+    .wf-seg { display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 600; color: #fff; min-width: 2px; overflow: hidden; white-space: nowrap; cursor: default; position: relative; box-sizing: border-box; }
+    .wf-seg.llm { background: #2b5278; }
+    .wf-seg.llm:nth-child(odd) { background: #35638f; }
+    .wf-seg.tool { background: #e88b4d; }
+    .wf-seg.tool.error { background: #e05252; }
+    .wf-seg .seg-text { padding: 0 4px; overflow: hidden; text-overflow: ellipsis; }
+
+    .wf-tooltip { position: fixed; background: #242f3d; border: 1px solid #35638f; border-radius: 4px; padding: 8px 10px; font-size: 11px; color: #cdd6e0; pointer-events: none; z-index: 999; white-space: pre-line; max-width: 320px; line-height: 1.5; }
+
+    .legend { display: flex; gap: 16px; margin-bottom: 16px; max-width: 1200px; margin-left: auto; margin-right: auto; font-size: 11px; color: #828a95; align-items: center; }
+    .legend-item { display: flex; align-items: center; gap: 4px; }
+    .legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
+
     ::-webkit-scrollbar { width: 8px; height: 8px; }
     ::-webkit-scrollbar-track { background: #0e1621; }
     ::-webkit-scrollbar-thumb { background: #2b5278; border-radius: 4px; }
@@ -54,10 +93,13 @@
     <h1 id="title">OpenClaw Timeline</h1>
     <div class="controls">
       <button onclick="location.href='/'">返回看板</button>
+      <button id="btn-timing" onclick="toggleTimingView()">Timing 分析</button>
       <button onclick="clearTimeline()">清空</button>
     </div>
   </header>
+  <div id="timing-panel"></div>
   <div id="timeline"></div>
+  <div id="wf-tooltip" class="wf-tooltip" style="display:none"></div>
 
   <script>
     const timeline = document.getElementById('timeline');
@@ -289,9 +331,161 @@
       } catch (err) { console.error(err); }
     }
 
+    // --- Timing Panel ---
+    const timingPanel = document.getElementById('timing-panel');
+    const timelineEl = document.getElementById('timeline');
+    const btnTiming = document.getElementById('btn-timing');
+    const tooltipEl = document.getElementById('wf-tooltip');
+    let timingActive = false;
+
+    function fmtDur(ms) {
+      if (ms < 1000) return ms + 'ms';
+      if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+      return (ms / 60000).toFixed(1) + 'min';
+    }
+
+    function pct(part, total) {
+      if (!total) return '0';
+      return (part / total * 100).toFixed(1);
+    }
+
+    function toggleTimingView() {
+      timingActive = !timingActive;
+      if (timingActive) {
+        btnTiming.classList.add('active');
+        timingPanel.classList.add('active');
+        timelineEl.classList.add('hidden');
+        loadTimingData();
+      } else {
+        btnTiming.classList.remove('active');
+        timingPanel.classList.remove('active');
+        timelineEl.classList.remove('hidden');
+      }
+    }
+
+    async function loadTimingData() {
+      timingPanel.innerHTML = '<div style="text-align:center;padding:40px;color:#6c7883">Loading timing data...</div>';
+      try {
+        const r = await fetch(`/api/session-timing?agent=${encodeURIComponent(agent || 'main')}&sid=${encodeURIComponent(sid)}`, { cache: 'no-store' });
+        const data = await r.json();
+        renderTimingPanel(data);
+      } catch (err) {
+        timingPanel.innerHTML = `<div style="text-align:center;padding:40px;color:#e05252">Load failed: ${err.message}</div>`;
+      }
+    }
+
+    function renderTimingPanel(data) {
+      const { turns, summary } = data;
+      if (!turns || !turns.length) {
+        timingPanel.innerHTML = '<div style="text-align:center;padding:40px;color:#6c7883">No timing data available</div>';
+        return;
+      }
+      const s = summary;
+      const llmPct = pct(s.totalLlmMs, s.totalMs);
+      const toolPct = pct(s.totalToolMs, s.totalMs);
+
+      let html = '';
+
+      // Summary cards
+      html += '<div class="timing-summary">';
+      html += `<div class="summary-card">
+        <div class="label">Total Duration</div>
+        <div class="value">${fmtDur(s.totalMs)}</div>
+        <div class="sub">${s.totalTurns} turns, ${s.llmCalls} LLM calls, ${s.toolCalls} tool calls</div>
+        <div class="ratio-bar"><div class="llm-part" style="width:${llmPct}%"></div><div class="tool-part" style="width:${toolPct}%"></div></div>
+        <div class="sub">LLM ${llmPct}% / Tool ${toolPct}%</div>
+      </div>`;
+      html += `<div class="summary-card">
+        <div class="label">Avg LLM Latency</div>
+        <div class="value ${s.avgLlmMs > 30000 ? 'highlight-warn' : ''}">${fmtDur(s.avgLlmMs)}</div>
+        <div class="sub">${s.llmCalls} calls total</div>
+      </div>`;
+      html += `<div class="summary-card">
+        <div class="label">Slowest LLM Call</div>
+        <div class="value highlight-warn">${s.longestLlm ? fmtDur(s.longestLlm.durationMs) : '-'}</div>
+        <div class="sub">${s.longestLlm ? `Turn ${s.longestLlm.turnIndex} · ${s.longestLlm.model || ''}` : ''}</div>
+      </div>`;
+      html += `<div class="summary-card">
+        <div class="label">Slowest Tool</div>
+        <div class="value">${s.longestTool ? fmtDur(s.longestTool.durationMs) : '-'}</div>
+        <div class="sub">${s.longestTool ? `Turn ${s.longestTool.turnIndex} · ${s.longestTool.name || ''}` : ''}</div>
+      </div>`;
+      html += '</div>';
+
+      // Legend
+      html += `<div class="legend">
+        <div class="legend-item"><div class="legend-swatch" style="background:#2b5278"></div> LLM Thinking</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#e88b4d"></div> Tool Execution</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#e05252"></div> Tool Error</div>
+      </div>`;
+
+      // Find max turn duration for proportional widths
+      const maxTurnMs = Math.max(...turns.map(t => t.totalMs), 1);
+
+      // Waterfall turns (newest first)
+      for (let i = turns.length - 1; i >= 0; i--) {
+        const turn = turns[i];
+        const barWidthPct = Math.max(5, turn.totalMs / maxTurnMs * 100);
+        html += `<div class="timing-turn-card">`;
+        html += `<div class="turn-header">
+          <span class="turn-label">Turn ${turn.turnIndex + 1}</span>
+          <span class="turn-stats">
+            ${fmtDur(turn.totalMs)} total
+            <span class="llm-color">LLM ${fmtDur(turn.llmMs)}</span>
+            <span class="tool-color">Tool ${fmtDur(turn.toolMs)}</span>
+            <span>${turn.phases.length} phases</span>
+          </span>
+        </div>`;
+        if (turn.userPreview) {
+          html += `<div class="turn-preview">User: ${escHtml(turn.userPreview)}</div>`;
+        }
+        if (turn.assistantPreview) {
+          html += `<div class="turn-preview">Bot: ${escHtml(turn.assistantPreview)}</div>`;
+        }
+        html += `<div class="waterfall" style="width:${barWidthPct.toFixed(1)}%">`;
+        const turnTotal = Math.max(turn.totalMs, 1);
+        for (const p of turn.phases) {
+          const segPct = Math.max(0.3, p.durationMs / turnTotal * 100);
+          const cls = p.type === 'llm' ? 'llm' : ('tool' + (p.isError ? ' error' : ''));
+          const label = p.type === 'llm' ? fmtDur(p.durationMs) : `${p.name} ${fmtDur(p.durationMs)}`;
+          const tipData = p.type === 'llm'
+            ? `LLM: ${fmtDur(p.durationMs)}\nModel: ${p.model || '-'}\nProvider: ${p.provider || '-'}\nInput: ${p.inputTokens} / Output: ${p.outputTokens}\nStop: ${p.stopReason || '-'}`
+            : `Tool: ${p.name}\nDuration: ${fmtDur(p.durationMs)}\nStatus: ${p.status || '-'}${p.isError ? '\n⚠ Error' : ''}`;
+          html += `<div class="wf-seg ${cls}" style="width:${segPct.toFixed(2)}%" data-tip="${escAttr(tipData)}"><span class="seg-text">${label}</span></div>`;
+        }
+        html += '</div></div>';
+      }
+
+      timingPanel.innerHTML = html;
+
+      // Tooltip handlers
+      timingPanel.querySelectorAll('.wf-seg').forEach(el => {
+        el.addEventListener('mouseenter', (ev) => {
+          tooltipEl.textContent = el.dataset.tip;
+          tooltipEl.style.display = 'block';
+          positionTooltip(ev);
+        });
+        el.addEventListener('mousemove', positionTooltip);
+        el.addEventListener('mouseleave', () => { tooltipEl.style.display = 'none'; });
+      });
+    }
+
+    function positionTooltip(ev) {
+      tooltipEl.style.left = (ev.clientX + 12) + 'px';
+      tooltipEl.style.top = (ev.clientY + 12) + 'px';
+    }
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function escAttr(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
     // Init
     loadSnapshot();
-    
+
     // SSE
     const es = new EventSource('/events');
     es.onmessage = (ev) => {
