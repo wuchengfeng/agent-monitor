@@ -18,6 +18,13 @@ const fileBuffers = new Map();
 // 文件大小不变时直接复用，避免每次全量重解析
 const statsCache = new Map();
 
+// --- LLM Capture ring buffer (in-memory) ---
+const llmCaptures = [];          // ordered by capturedAt
+const MAX_CAPTURES = 200;
+const MAX_CAPTURE_BYTES = 50 * 1024 * 1024;
+let captureIdCounter = 0;
+let captureTotalBytes = 0;
+
 const MONITOR_SETTINGS_FILE = path.join(BASE_ROOT, 'agent-monitor', 'monitor_settings.json');
 const CHANNEL_NICKNAMES_FILE = path.join(BASE_ROOT, 'agent-monitor', 'channel_nicknames.json');
 
@@ -1064,6 +1071,91 @@ const server = http.createServer(async (req, res) => {
     });
     return;
   }
+  // --- LLM Capture API ---
+  if (parsed.pathname === '/api/llm-capture' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { if (body.length < 5 * 1024 * 1024) body += c; });
+    req.on('end', () => {
+      try {
+        const capture = JSON.parse(body);
+        capture._id = ++captureIdCounter;
+        const size = Buffer.byteLength(body, 'utf8');
+        capture._size = size;
+
+        // Evict oldest if over limits
+        while (llmCaptures.length >= MAX_CAPTURES || (captureTotalBytes + size > MAX_CAPTURE_BYTES && llmCaptures.length > 0)) {
+          const evicted = llmCaptures.shift();
+          captureTotalBytes -= (evicted._size || 0);
+        }
+        llmCaptures.push(capture);
+        captureTotalBytes += size;
+
+        // SSE broadcast lightweight notification
+        const notify = {
+          type: 'llm-capture',
+          captureId: capture._id,
+          capturedAt: capture.capturedAt,
+          model: capture.model,
+          messageCount: capture.messageCount,
+          toolCount: capture.toolCount,
+          durationMs: capture.durationMs,
+          requestSize: capture.requestSize,
+          responseSize: capture.responseSize,
+        };
+        for (const c of clients) sendEvent(c, notify);
+
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.end(JSON.stringify({ ok: true, id: capture._id }));
+      } catch (e) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: String(e.message || e) }));
+      }
+    });
+    return;
+  }
+
+  if (parsed.pathname === '/api/llm-captures' && req.method === 'GET') {
+    const since = parsed.query.since ? new Date(parsed.query.since).getTime() : 0;
+    const limit = Math.min(parseInt(parsed.query.limit) || 100, 500);
+    const summaries = [];
+    for (let i = llmCaptures.length - 1; i >= 0 && summaries.length < limit; i--) {
+      const c = llmCaptures[i];
+      if (since && new Date(c.capturedAt).getTime() <= since) continue;
+      summaries.push({
+        _id: c._id,
+        capturedAt: c.capturedAt,
+        requestStartedAt: c.requestStartedAt,
+        durationMs: c.durationMs,
+        model: c.model,
+        messageCount: c.messageCount,
+        toolCount: c.toolCount,
+        requestSize: c.requestSize,
+        responseSize: c.responseSize,
+      });
+    }
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.end(JSON.stringify(summaries));
+    return;
+  }
+
+  // GET /api/llm-capture/:id
+  const captureMatch = parsed.pathname.match(/^\/api\/llm-capture\/(\d+)$/);
+  if (captureMatch && req.method === 'GET') {
+    const id = parseInt(captureMatch[1]);
+    const found = llmCaptures.find(c => c._id === id);
+    if (!found) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'Capture not found' }));
+      return;
+    }
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.end(JSON.stringify(found));
+    return;
+  }
+
   let pathname = parsed.pathname === '/' ? 'index.html' : parsed.pathname.replace(/^\/+/, '');
   const fp = path.join(__dirname, 'public', pathname);
   fs.readFile(fp, (err, data) => {

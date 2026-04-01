@@ -8,19 +8,36 @@ A real-time web dashboard for monitoring [OpenClaw](https://openclaw.ai) agent s
 - Node.js ≥ 18
 - Git
 
-## One-line Install
+## One-line Deploy (Mac)
 
-**Mac / Linux:**
+Full deploy including LLM request capture:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wuchengfeng/agent-monitor/main/deploy.sh | bash
+```
+
+This will:
+1. Install mitmproxy if missing (via Homebrew)
+2. Clone/update the repo to `~/.openclaw-agent-monitor`
+3. Patch `~/.openclaw/openclaw.json` to route LLM calls through the proxy
+4. Start both the monitor server (port 4000) and LLM proxy (port 8888)
+5. Open the dashboard in your browser
+
+**After deploy, restart your OpenClaw gateway:**
+```bash
+openclaw gateway restart
+```
+
+**Stop everything:**
+```bash
+bash ~/.openclaw-agent-monitor/stop.sh
+```
+
+## Monitor Only (no LLM capture)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wuchengfeng/agent-monitor/main/install.sh | bash
 ```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/wuchengfeng/agent-monitor/main/install.ps1 | iex
-```
-
-Installs to `~/.openclaw-agent-monitor`, starts the server, and opens your browser automatically. Run the same command again to update.
 
 ## Manual Start
 
@@ -62,6 +79,7 @@ PORT=3001 npm start
 - **Live session stream** — real-time token and tool call feed via SSE
 - **Session history** — browse past sessions with full message timeline
 - **Token usage** — input/output/cache token counts per message
+- **LLM request capture** — view full API requests (system prompt, messages, tools, parameters) via mitmproxy
 - **Heartbeat scheduler** — configure time-based heartbeat intervals
 - **Auto soft-delete** — automatically archive old sessions
 

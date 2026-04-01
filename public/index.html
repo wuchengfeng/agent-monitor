@@ -102,6 +102,13 @@
     let deletedCache = [];
     let deletedCacheAt = 0;
 
+    // --- LLM Capture state ---
+    const llmCaptures = [];        // array of capture summaries from SSE/polling
+    const llmCapturesFull = new Map(); // captureId -> full capture body (lazy loaded)
+    let llmCapturesPanelOpen = false;
+    let selectedCaptureId = null;
+    let llmCaptureDetailExpanded = new Set(); // track which sections are expanded
+
     function saveArchived() {
       localStorage.setItem('agent_monitor_archived', JSON.stringify([...archived]));
     }
@@ -128,6 +135,206 @@
     function toggleShowArchived() {
       showArchived = !showArchived;
       render();
+    }
+
+    // --- LLM Capture functions ---
+    function handleLlmCaptureEvent(ev) {
+      // Deduplicate by captureId
+      if (llmCaptures.some(c => c._id === ev.captureId)) return;
+      llmCaptures.unshift({
+        _id: ev.captureId,
+        capturedAt: ev.capturedAt,
+        model: ev.model,
+        messageCount: ev.messageCount,
+        toolCount: ev.toolCount,
+        durationMs: ev.durationMs,
+        requestSize: ev.requestSize,
+        responseSize: ev.responseSize,
+      });
+      if (llmCaptures.length > 200) llmCaptures.pop();
+      if (llmCapturesPanelOpen) renderLlmCapturesPanel();
+    }
+
+    async function pollLlmCaptures() {
+      try {
+        const resp = await fetch('/api/llm-captures?limit=100');
+        const list = await resp.json();
+        for (const c of list) {
+          if (!llmCaptures.some(x => x._id === c._id)) {
+            llmCaptures.push(c);
+          }
+        }
+        llmCaptures.sort((a, b) => (b._id || 0) - (a._id || 0));
+      } catch {}
+    }
+
+    async function fetchCaptureDetail(id) {
+      if (llmCapturesFull.has(id)) return llmCapturesFull.get(id);
+      try {
+        const resp = await fetch(`/api/llm-capture/${id}`);
+        const data = await resp.json();
+        llmCapturesFull.set(id, data);
+        // Evict old entries if cache grows too large
+        if (llmCapturesFull.size > 50) {
+          const first = llmCapturesFull.keys().next().value;
+          llmCapturesFull.delete(first);
+        }
+        return data;
+      } catch { return null; }
+    }
+
+    function toggleLlmCapturesPanel() {
+      llmCapturesPanelOpen = !llmCapturesPanelOpen;
+      document.getElementById('llm-captures-overlay').style.display = llmCapturesPanelOpen ? 'flex' : 'none';
+      if (llmCapturesPanelOpen) {
+        pollLlmCaptures().then(() => renderLlmCapturesPanel());
+      }
+    }
+
+    function selectCapture(id) {
+      selectedCaptureId = id;
+      llmCaptureDetailExpanded = new Set();
+      fetchCaptureDetail(id).then(() => renderLlmCapturesPanel());
+    }
+
+    function toggleCaptureSection(section) {
+      if (llmCaptureDetailExpanded.has(section)) {
+        llmCaptureDetailExpanded.delete(section);
+      } else {
+        llmCaptureDetailExpanded.add(section);
+      }
+      renderLlmCapturesPanel();
+    }
+
+    function copyCaptureJson() {
+      const data = llmCapturesFull.get(selectedCaptureId);
+      if (data) {
+        navigator.clipboard.writeText(JSON.stringify(data.request, null, 2)).catch(() => {});
+      }
+    }
+
+    function renderLlmCapturesPanel() {
+      const listEl = document.getElementById('llm-captures-list');
+      const detailEl = document.getElementById('llm-captures-detail');
+      if (!listEl) return;
+
+      // Render list
+      listEl.innerHTML = llmCaptures.length ? llmCaptures.map(c => {
+        const sel = c._id === selectedCaptureId ? 'selected' : '';
+        const t = fmtTimeHms(c.capturedAt);
+        const sizeKB = Math.round((c.requestSize || 0) / 1024);
+        return `<div class="list-row ${sel}" onclick="selectCapture(${c._id})" style="grid-template-columns:60px 1fr 80px 80px 60px">
+          <div class="cell-time">${t}</div>
+          <div class="cell-type"><span class="tag tag-other">${escHtml((c.model||'?').split('/').pop())}</span></div>
+          <div class="cell-snippet">${c.messageCount||0} msgs</div>
+          <div class="cell-snippet">${c.toolCount||0} tools</div>
+          <div class="cell-tokens">${sizeKB}KB</div>
+        </div>`;
+      }).join('') : '<div class="mono" style="padding:10px">暂无 LLM 请求捕获。请确保 mitmproxy 已启动。</div>';
+
+      // Render detail
+      if (!detailEl) return;
+      const capture = llmCapturesFull.get(selectedCaptureId);
+      if (!capture) {
+        detailEl.innerHTML = '<div class="mono" style="padding:10px">点击左侧列表查看详情</div>';
+        return;
+      }
+
+      const req = capture.request || {};
+      const messages = req.messages || [];
+      const tools = req.tools || [];
+      const resp = capture.response || {};
+
+      // Params section (always visible)
+      const params = ['model','temperature','max_tokens','max_completion_tokens','top_p','stream','stop','frequency_penalty','presence_penalty']
+        .filter(k => req[k] !== undefined)
+        .map(k => `<span class="badge">${k}: ${JSON.stringify(req[k])}</span>`)
+        .join(' ');
+
+      // System prompt
+      const sysMessages = messages.filter(m => m.role === 'system' || m.role === 'developer');
+      const sysExpanded = llmCaptureDetailExpanded.has('system');
+      const sysContent = sysMessages.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n---\n');
+      const sysSection = sysMessages.length ? `
+        <div style="margin-top:10px">
+          <div class="row" style="gap:8px;cursor:pointer" onclick="toggleCaptureSection('system')">
+            <div class="badge" style="background:#2b1a00;border-color:#5c3a00;color:#ffcc80">System Prompt</div>
+            <span class="mono">${sysContent.length.toLocaleString()} chars</span>
+            <span class="mono">${sysExpanded ? '▼' : '▶'}</span>
+          </div>
+          ${sysExpanded ? `<div class="detail-box" style="max-height:400px;overflow:auto">${escHtml(sysContent)}</div>` : ''}
+        </div>` : '';
+
+      // Conversation messages (non-system)
+      const convMessages = messages.filter(m => m.role !== 'system' && m.role !== 'developer');
+      const msgsExpanded = llmCaptureDetailExpanded.has('messages');
+      let msgsInner = '';
+      if (msgsExpanded) {
+        const roleColors = {user:'#234a86',assistant:'#1b6b4e',tool:'#5e2a86'};
+        msgsInner = '<div style="margin-top:6px">' + convMessages.map(function(m, i) {
+          var msgKey = 'msg_' + i;
+          var msgExpanded = llmCaptureDetailExpanded.has(msgKey);
+          var contentStr = typeof m.content === 'string' ? m.content : JSON.stringify(m.content, null, 2);
+          var preview = contentStr.replace(/\s+/g, ' ').slice(0, 100);
+          var rc = roleColors[m.role] || '#2c3c4d';
+          var tcInfo = m.tool_calls ? ' [' + m.tool_calls.map(function(tc){ return tc.function && tc.function.name || tc.name || '?'; }).join(', ') + ']' : '';
+          var detailBox = msgExpanded
+            ? '<div class="detail-box" style="max-height:300px;overflow:auto">' + escHtml(contentStr) + (m.tool_calls ? '\n\n--- Tool Calls ---\n' + escHtml(JSON.stringify(m.tool_calls, null, 2)) : '') + '</div>'
+            : '';
+          return '<div style="margin-bottom:4px">'
+            + '<div class="row" style="gap:6px;cursor:pointer" onclick="toggleCaptureSection(\'' + msgKey + '\')">'
+            + '<span class="badge" style="border-color:' + rc + ';min-width:60px">' + escHtml(m.role) + '</span>'
+            + '<span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(preview) + escHtml(tcInfo) + '</span>'
+            + '<span class="mono">' + (msgExpanded ? '▼' : '▶') + '</span>'
+            + '</div>'
+            + detailBox
+            + '</div>';
+        }).join('') + '</div>';
+      }
+      const msgsSection = `
+        <div style="margin-top:10px">
+          <div class="row" style="gap:8px;cursor:pointer" onclick="toggleCaptureSection('messages')">
+            <div class="badge" style="background:#0a1a2e;border-color:#234a86;color:#a9c7ff">Messages (${convMessages.length})</div>
+            <span class="mono">${msgsExpanded ? '▼' : '▶'}</span>
+          </div>
+          ${msgsInner}
+        </div>`;
+
+      // Tools
+      const toolsExpanded = llmCaptureDetailExpanded.has('tools');
+      const toolsSection = tools.length ? `
+        <div style="margin-top:10px">
+          <div class="row" style="gap:8px;cursor:pointer" onclick="toggleCaptureSection('tools')">
+            <div class="badge" style="background:#1a0a2e;border-color:#5e2a86;color:#e1bee7">Tools (${tools.length})</div>
+            <span class="mono">${toolsExpanded ? '▼' : '▶'}</span>
+          </div>
+          ${toolsExpanded ? `<div class="detail-box" style="max-height:400px;overflow:auto">${escHtml(JSON.stringify(tools, null, 2))}</div>` : ''}
+        </div>` : '';
+
+      // Response
+      const respExpanded = llmCaptureDetailExpanded.has('response');
+      const usageStr = resp.usage ? `in:${(resp.usage.prompt_tokens||resp.usage.input||0).toLocaleString()} out:${(resp.usage.completion_tokens||resp.usage.output||0).toLocaleString()}` : '';
+      const respSection = `
+        <div style="margin-top:10px">
+          <div class="row" style="gap:8px;cursor:pointer" onclick="toggleCaptureSection('response')">
+            <div class="badge" style="background:#0a2e1a;border-color:#1b6b4e;color:#a5d6a7">Response</div>
+            <span class="mono">${usageStr}</span>
+            <span class="mono">${capture.durationMs || 0}ms</span>
+            <span class="mono">${respExpanded ? '▼' : '▶'}</span>
+          </div>
+          ${respExpanded ? `<div class="detail-box" style="max-height:300px;overflow:auto">${escHtml(JSON.stringify(resp, null, 2))}</div>` : ''}
+        </div>`;
+
+      detailEl.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <div class="row" style="gap:6px;flex-wrap:wrap">${params}</div>
+          <button class="btn-copy" onclick="copyCaptureJson()">复制请求 JSON</button>
+        </div>
+        ${sysSection}
+        ${msgsSection}
+        ${toolsSection}
+        ${respSection}
+      `;
     }
 
     function fmtTs(ts){try{const d=new Date(typeof ts==='number'?ts:Date.parse(ts));const date=`${d.getMonth()+1}-${String(d.getDate()).padStart(2,'0')}`;return `${date} ${d.toLocaleTimeString()}`}catch{return String(ts)}}
@@ -1393,7 +1600,7 @@
       setInterval(() => refreshDeletedList(false).then(() => render()), 5000);
       // 同时尝试建立 SSE（若不可用则忽略，由快照兜底）
       const es=new EventSource('/events');
-      es.onmessage=(ev)=>{try{const e=JSON.parse(ev.data);upsert(e, false)}catch{}};
+      es.onmessage=(ev)=>{try{const e=JSON.parse(ev.data);if(e.type==='llm-capture'){handleLlmCaptureEvent(e)}else{upsert(e, false)}}catch{}};
       es.onerror=()=>{};
 
       window.addEventListener('resize', ()=>render());
@@ -1409,6 +1616,7 @@
         <button class="toggle-archived" onclick="location.href='/activity'">详细时间轴 (Activity)</button>
         <button id="btn-channel-view" class="toggle-archived" onclick="toggleChannelView()">频道视图</button>
         <button class="toggle-archived" onclick="openAutoDeleteSettings()">自动软删设置</button>
+        <button class="toggle-archived" onclick="toggleLlmCapturesPanel()" style="border-color:#5e2a86;color:#e1bee7">LLM Requests</button>
         <button id="btn-toggle-deleted" class="toggle-archived" onclick="toggleDeletedPanel()">已删除</button>
         <button id="btn-toggle-archived" class="toggle-archived" onclick="toggleShowArchived()">显示归档</button>
       </div>
@@ -1432,6 +1640,26 @@
         </div>
       </div>
       <div id="deleted-list" class="panel-body"></div>
+    </div>
+  </div>
+  <div id="llm-captures-overlay" class="overlay" onclick="if(event.target===this)toggleLlmCapturesPanel()" style="display:none">
+    <div class="panel" style="width:min(1200px,95%);max-height:90vh;display:flex;flex-direction:column" onclick="event.stopPropagation()">
+      <div class="panel-head">
+        <div class="row" style="gap:10px">
+          <div class="badge" style="border-color:#5e2a86;color:#e1bee7">LLM Requests</div>
+          <div class="mono">mitmproxy 捕获的完整 API 请求/响应</div>
+        </div>
+        <div class="row" style="gap:6px">
+          <button class="toggle-archived" onclick="pollLlmCaptures().then(()=>renderLlmCapturesPanel())">刷新</button>
+          <button class="toggle-archived" onclick="toggleLlmCapturesPanel()">关闭</button>
+        </div>
+      </div>
+      <div style="flex:1;min-height:0;display:grid;grid-template-columns:320px 1fr;overflow:hidden">
+        <div id="llm-captures-list" style="overflow:auto;border-right:1px solid #1c2834;padding:4px 0"></div>
+        <div id="llm-captures-detail" style="overflow:auto;padding:12px">
+          <div class="mono">点击左侧列表查看详情</div>
+        </div>
+      </div>
     </div>
   </div>
   <div id="grid"></div>
