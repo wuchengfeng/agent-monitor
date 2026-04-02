@@ -84,6 +84,27 @@
     .tag-qwen{border-color:#5e2a86;background:rgba(156,39,176,.12);color:#e1bee7}
     .tag-deepseek{border-color:#4c4c4c;background:rgba(158,158,158,.12);color:#e0e0e0}
     .tag-other{border-color:#2c3c4d;background:rgba(122,162,213,.10);color:#cfe3ff}
+
+    /* LLM capture list */
+    #llm-captures-list{display:flex;flex-direction:column;gap:4px;padding:8px 6px !important}
+    #llm-captures-list .llm-cap-row{
+      border:1px solid #2b3c4f !important;
+      border-bottom:1px solid #2b3c4f !important;
+      border-radius:10px;
+      background:#101b27;
+      transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease,background .16s ease;
+    }
+    #llm-captures-list .llm-cap-row:hover{
+      transform:translateX(4px);
+      background:#152434 !important;
+      border-color:#4b6f93 !important;
+      box-shadow:0 8px 18px rgba(0,0,0,.32);
+    }
+    #llm-captures-list .llm-cap-row.selected{
+      background:rgba(58,120,255,.26) !important;
+      border-color:rgba(120,170,255,.85) !important;
+      box-shadow:0 0 0 1px rgba(120,170,255,.45),0 10px 24px rgba(58,120,255,.26);
+    }
   </style>
   <script>
     const state = new Map(); // agentId:sessionId -> { data..., lastTs, bumpTs, updatedAt, interactions: [] }
@@ -223,12 +244,14 @@
         const sel = c._id === selectedCaptureId ? 'selected' : '';
         const t = fmtTimeHms(c.capturedAt);
         const sizeKB = Math.round((c.requestSize || 0) / 1024);
-        return `<div class="list-row ${sel}" onclick="selectCapture(${c._id})" style="grid-template-columns:60px 1fr 80px 80px 60px">
+        const model = (c.model||'?').split('/').pop();
+        const dur = c.durationMs ? (c.durationMs/1000).toFixed(1)+'s' : '';
+        return `<div class="list-row llm-cap-row ${sel}" onclick="selectCapture(${c._id})" style="grid-template-columns:56px 1fr;gap:6px;align-items:center;padding:8px 10px">
           <div class="cell-time">${t}</div>
-          <div class="cell-type"><span class="tag tag-other">${escHtml((c.model||'?').split('/').pop())}</span></div>
-          <div class="cell-snippet">${c.messageCount||0} msgs</div>
-          <div class="cell-snippet">${c.toolCount||0} tools</div>
-          <div class="cell-tokens">${sizeKB}KB</div>
+          <div style="overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px">
+            <span class="tag tag-other" style="font-size:10px">${escHtml(model)}</span>
+            <span class="mono" style="opacity:.7">${c.messageCount||0}m ${c.toolCount||0}t ${sizeKB}KB ${dur}</span>
+          </div>
         </div>`;
       }).join('') : '<div class="mono" style="padding:10px">暂无 LLM 请求捕获。请确保 mitmproxy 已启动。</div>';
 
