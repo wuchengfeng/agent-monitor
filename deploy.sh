@@ -2,7 +2,7 @@
 set -e
 
 REPO="https://github.com/wuchengfeng/agent-monitor.git"
-INSTALL_DIR="$HOME/.openclaw-agent-monitor"
+INSTALL_DIR="$HOME/.openclaw/workspace/agent-monitor"
 OPENCLAW_JSON="$HOME/.openclaw/openclaw.json"
 MONITOR_PORT=4000
 PROXY_PORT=8888
@@ -40,13 +40,10 @@ if ! command -v mitmdump &>/dev/null; then
 fi
 echo "[OK] mitmproxy ($(mitmdump --version 2>/dev/null | head -1))"
 
-# --- 4. Clone or update repo ---
-if [ -d "$INSTALL_DIR/.git" ]; then
-  echo "[..] Updating agent-monitor..."
-  git -C "$INSTALL_DIR" pull --ff-only
-else
-  echo "[..] Cloning agent-monitor..."
-  git clone "$REPO" "$INSTALL_DIR"
+# --- 4. Check install dir ---
+if [ ! -d "$INSTALL_DIR" ]; then
+  echo "Error: Install dir not found at $INSTALL_DIR" >&2
+  exit 1
 fi
 echo "[OK] Code at $INSTALL_DIR"
 

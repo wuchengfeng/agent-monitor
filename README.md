@@ -47,6 +47,14 @@ cd agent-monitor
 node server.js
 ```
 
+带抓包的启动：
+```bash
+#启动模板
+bash ~/安装目录/agent-monitor/deploy.sh
+#例如
+bash ~/.openclaw/workspace/agent-monitor/deploy.sh
+```
+
 Open **http://localhost:4000** in your browser.
 
 ## Configuration
