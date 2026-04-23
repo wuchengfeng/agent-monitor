@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bridge Conversations</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b0f14;color:#e6eef8;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+    header{padding:12px 16px;background:#0e1621;border-bottom:1px solid #1c2834;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+    h1{font-size:16px;margin:0;font-weight:600;color:#fff}
+    .controls{display:flex;gap:8px;align-items:center}
+    .btn{cursor:pointer;font-size:12px;color:#7aa2d5;border:1px solid #243444;padding:4px 10px;border-radius:4px;background:#0e1621;text-decoration:none}
+    .btn:hover{background:#1c2834}
+    .badge{font-size:12px;padding:2px 6px;border-radius:6px;border:1px solid #2a3e52;color:#d6e7ff}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;color:#a8b3bf;word-break:break-all}
+
+    /* Layout */
+    .main{flex:1;min-height:0;display:grid;grid-template-columns:320px 1fr;overflow:hidden}
+    .sidebar{overflow:auto;border-right:1px solid #1c2834;padding:4px 0}
+    .chat-pane{overflow:auto;padding:16px;display:flex;flex-direction:column}
+
+    /* Session list */
+    .session-row{display:grid;grid-template-columns:56px 1fr;gap:6px;align-items:center;padding:10px 12px;cursor:pointer;border-bottom:1px solid #111a24;transition:background .12s}
+    .session-row:hover{background:#111a24}
+    .session-row.selected{background:rgba(46,125,50,.15);border-bottom-color:rgba(46,125,50,.3)}
+    .cell-time{color:#5c6b7f;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px}
+
+    /* Chat header */
+    .chat-header{margin-bottom:12px;padding:10px 14px;border:1px solid #1c2834;border-radius:8px;background:#0e161e;display:flex;gap:10px;align-items:center;flex-wrap:wrap;flex-shrink:0}
+
+    /* Chat bubbles */
+    .bridge-chat{display:flex;flex-direction:column;gap:14px;flex:1}
+    .bridge-bubble{max-width:82%;padding:10px 14px;border-radius:14px;font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+    .bridge-bubble-remote{align-self:flex-start;background:#0f1f2e;border:1px solid #1b3a5c;border-top-left-radius:4px}
+    .bridge-bubble-local{align-self:flex-end;background:#0a1f14;border:1px solid #1b5c3a;border-top-right-radius:4px}
+    .bridge-bubble-name{font-size:11px;font-weight:700;margin-bottom:4px}
+    .bridge-bubble-remote .bridge-bubble-name{color:#81d4fa}
+    .bridge-bubble-local .bridge-bubble-name{color:#a5d6a7}
+    .bridge-bubble-meta{display:flex;gap:8px;align-items:center;margin-top:6px;font-size:10px;color:#5c6b7f}
+    .bridge-bubble-error{border-color:#5c2a2a;background:#1a0e0e}
+    .bridge-prompt-toggle{cursor:pointer;font-size:10px;color:#5c6b7f;user-select:none}
+    .bridge-prompt-toggle:hover{color:#7aa2d5}
+    .bridge-prompt-box{margin-top:6px;padding:6px 8px;border:1px solid #1c2834;border-radius:4px;background:#0b0f14;font-size:11px;color:#7a8a9a;max-height:150px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+    .bridge-end-tag{display:inline-block;font-size:10px;padding:1px 6px;border-radius:4px;border:1px solid #f9a825;color:#f9a825;margin-top:4px}
+    .empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#5c6b7f;font-size:14px}
+  </style>
+</head>
+<body>
+  <header>
+    <div style="display:flex;align-items:center;gap:10px">
+      <h1>Bridge Conversations</h1>
+      <span class="mono" style="opacity:.6">Agent 跨机器对话</span>
+    </div>
+    <div class="controls">
+      <button class="btn" onclick="pollEvents()">刷新</button>
+      <a href="/" class="btn">← 返回监控</a>
+    </div>
+  </header>
+  <div class="main">
+    <div class="sidebar" id="session-list"></div>
+    <div class="chat-pane" id="chat-pane">
+      <div class="empty-state">← 选择一个会话查看对话</div>
+    </div>
+  </div>
+
+  <script>
+    let events = [];
+    let selectedSession = null;
+    let expandedPrompts = new Set();
+
+    function escHtml(s) {
+      return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function fmtTime(ts) {
+      try {
+        const d = new Date(typeof ts === 'number' ? ts : Date.parse(ts));
+        return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0') + ':' + d.getSeconds().toString().padStart(2,'0');
+      } catch { return '--:--:--'; }
+    }
+    function fmtDate(ts) {
+      try {
+        const d = new Date(typeof ts === 'number' ? ts : Date.parse(ts));
+        return (d.getMonth()+1) + '-' + String(d.getDate()).padStart(2,'0') + ' ' + fmtTime(ts);
+      } catch { return String(ts); }
+    }
+
+    function groupSessions() {
+      const map = new Map();
+      for (const ev of events) {
+        const sid = ev.sessionId || 'unknown';
+        if (!map.has(sid)) map.set(sid, []);
+        map.get(sid).push(ev);
+      }
+      return [...map.entries()].sort((a, b) => {
+        const aT = Math.max(...a[1].map(e => new Date(e.timestamp || 0).getTime()));
+        const bT = Math.max(...b[1].map(e => new Date(e.timestamp || 0).getTime()));
+        return bT - aT;
+      });
+    }
+
+    function selectSession(sid) {
+      selectedSession = sid;
+      expandedPrompts = new Set();
+      renderAll();
+    }
+
+    function togglePrompt(key) {
+      if (expandedPrompts.has(key)) expandedPrompts.delete(key);
+      else expandedPrompts.add(key);
+      renderChat();
+    }
+
+    function renderAll() {
+      renderList();
+      renderChat();
+    }
+
+    function renderList() {
+      const el = document.getElementById('session-list');
+      const sessions = groupSessions();
+
+      if (sessions.length === 0) {
+        el.innerHTML = '<div class="mono" style="padding:16px;text-align:center">暂无桥接对话<br><br>在 yach 群里 @bot 触发桥接后，对话将显示在这里</div>';
+        return;
+      }
+
+      el.innerHTML = sessions.map(([sid, evts]) => {
+        const sel = sid === selectedSession ? ' selected' : '';
+        const first = evts.reduce((a, b) => (a.round || 99) < (b.round || 99) ? a : b, evts[0]);
+        const totalDur = evts.reduce((s, e) => s + (e.durationMs || 0), 0);
+        const maxR = first.maxRounds || '?';
+        const rounds = evts.length;
+        const hasError = evts.some(e => e.status === 'error');
+        const hasBridgeEnd = evts.some(e => e.status === 'bridge_end');
+        const statusTag = hasError
+          ? '<span style="color:#ef5350">ERROR</span>'
+          : hasBridgeEnd
+            ? '<span style="color:#fdd835">END</span>'
+            : rounds >= maxR
+              ? '<span style="color:#a5d6a7">DONE</span>'
+              : '<span style="color:#81d4fa">...</span>';
+        return '<div class="session-row' + sel + '" onclick="selectSession(\'' + escHtml(sid) + '\')">'
+          + '<div class="cell-time">' + fmtTime(first.timestamp) + '</div>'
+          + '<div style="overflow:hidden;font-size:11px;min-width:0">'
+          + '<div style="white-space:nowrap;text-overflow:ellipsis;overflow:hidden">'
+          + '<span style="color:#a5d6a7">' + escHtml(first.localAgent || '?') + '</span>'
+          + ' ⇄ <span style="color:#81d4fa">' + escHtml(first.remoteBot || '?') + '</span></div>'
+          + '<div class="mono" style="opacity:.7;margin-top:2px">'
+          + rounds + '/' + maxR + ' · ' + (totalDur/1000).toFixed(1) + 's · ' + statusTag
+          + '</div></div></div>';
+      }).join('');
+    }
+
+    function renderChat() {
+      const pane = document.getElementById('chat-pane');
+      const sessions = groupSessions();
+      const sessionMap = new Map(sessions);
+
+      if (!selectedSession || !sessionMap.has(selectedSession)) {
+        pane.innerHTML = '<div class="empty-state">← 选择一个会话查看对话</div>';
+        return;
+      }
+
+      const evts = sessionMap.get(selectedSession);
+      evts.sort((a, b) => (a.round || 0) - (b.round || 0));
+      const first = evts[0] || {};
+      const totalDur = evts.reduce((s, e) => s + (e.durationMs || 0), 0);
+
+      let html = '<div class="chat-header">'
+        + '<span style="color:#a5d6a7;font-weight:700;font-size:14px">' + escHtml(first.localAgent || '?') + '</span>'
+        + '<span style="opacity:.4">⇄</span>'
+        + '<span style="color:#81d4fa;font-weight:700;font-size:14px">' + escHtml(first.remoteBot || '?') + '</span>'
+        + '<span class="mono" style="opacity:.5;font-size:11px;margin-left:auto">'
+        + evts.length + '/' + (first.maxRounds || '?') + ' rounds · '
+        + (totalDur/1000).toFixed(1) + 's · group:' + escHtml(first.groupId || '?')
+        + ' · ' + fmtDate(first.timestamp)
+        + '</span></div>';
+
+      html += '<div class="bridge-chat">';
+      for (const ev of evts) {
+        const isRemote = ev.direction === 'remote';
+        const agentName = isRemote ? (ev.remoteBot || '?') : (ev.localAgent || '?');
+        const bubbleClass = isRemote ? 'bridge-bubble-remote' : 'bridge-bubble-local';
+        const isError = ev.status === 'error';
+        const isBridgeEnd = ev.status === 'bridge_end';
+        const dur = ev.durationMs ? (ev.durationMs / 1000).toFixed(1) + 's' : '';
+        const reply = ev.replyReceived || '';
+        const promptKey = ev.sessionId + '_' + ev.round;
+        const promptExpanded = expandedPrompts.has(promptKey);
+
+        html += '<div class="bridge-bubble ' + bubbleClass + (isError ? ' bridge-bubble-error' : '') + '">';
+        html += '<div class="bridge-bubble-name">' + escHtml(agentName) + ' <span style="opacity:.4;font-weight:400">R' + ev.round + '</span></div>';
+
+        if (isError && ev.error) {
+          html += '<div style="color:#ef5350;font-size:12px">' + escHtml(String(ev.error).slice(0, 500)) + '</div>';
+        } else if (reply) {
+          html += '<div style="color:#d0dae5">' + escHtml(reply) + '</div>';
+        } else {
+          html += '<div style="color:#5c6b7f;font-style:italic">（无回复）</div>';
+        }
+
+        if (isBridgeEnd) {
+          html += '<div class="bridge-end-tag">BRIDGE_END</div>';
+        }
+
+        html += '<div class="bridge-bubble-meta">';
+        if (dur) html += '<span>' + dur + '</span>';
+        html += '<span>' + fmtTime(ev.timestamp) + '</span>';
+        if (ev.messageSent) {
+          html += '<span class="bridge-prompt-toggle" onclick="event.stopPropagation();togglePrompt(\'' + escHtml(promptKey) + '\')">'
+            + (promptExpanded ? '▼ 收起提示词' : '▶ 查看提示词') + '</span>';
+        }
+        html += '</div>';
+
+        if (promptExpanded && ev.messageSent) {
+          html += '<div class="bridge-prompt-box">' + escHtml(ev.messageSent) + '</div>';
+        }
+
+        html += '</div>';
+      }
+      html += '</div>';
+
+      pane.innerHTML = html;
+      pane.scrollTop = pane.scrollHeight;
+    }
+
+    async function pollEvents() {
+      try {
+        const resp = await fetch('/api/bridge-events?limit=500');
+        events = await resp.json();
+        renderAll();
+      } catch (err) {
+        console.error('Failed to load bridge events:', err);
+      }
+    }
+
+    // SSE real-time updates
+    const es = new EventSource('/events');
+    es.onmessage = (ev) => {
+      try {
+        const e = JSON.parse(ev.data);
+        if (e.type !== 'bridge-event') return;
+        if (events.some(x => x._id === e._id)) return;
+        events.unshift(e);
+        if (events.length > 500) events.pop();
+        renderAll();
+      } catch {}
+    };
+
+    // Init
+    pollEvents();
+  </script>
+</body>
+</html>

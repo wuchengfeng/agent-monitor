@@ -84,6 +84,15 @@
     .tag-qwen{border-color:#5e2a86;background:rgba(156,39,176,.12);color:#e1bee7}
     .tag-deepseek{border-color:#4c4c4c;background:rgba(158,158,158,.12);color:#e0e0e0}
     .tag-other{border-color:#2c3c4d;background:rgba(122,162,213,.10);color:#cfe3ff}
+    .agent-tag{display:inline-flex;align-items:center;font-size:11px;padding:1px 7px;border-radius:999px;white-space:nowrap;font-weight:600;letter-spacing:.2px}
+    .agent-tag-main{border:1px solid #234a86;background:rgba(58,120,255,.15);color:#a9c7ff}
+    .agent-tag-nanbosirui{border:1px solid #1b6b4e;background:rgba(76,175,80,.12);color:#a5d6a7}
+    .agent-tag-nanbosuikesi{border:1px solid #5e2a86;background:rgba(156,39,176,.12);color:#e1bee7}
+    .agent-tag-default{border:1px solid #3a3a3a;background:rgba(158,158,158,.12);color:#bbb}
+    .ch-row{display:grid;grid-template-columns:24px minmax(0,2fr) auto minmax(0,1fr) minmax(0,3fr) auto auto;gap:10px;align-items:center;padding:9px 10px;border-bottom:1px solid #1c2834;font-size:12px;transition:background .15s}
+    .ch-row:hover{background:#111a24}
+    .ch-section-head{display:flex;align-items:center;gap:8px;padding:10px 10px 6px;cursor:pointer;user-select:none;color:#5c6b7f;font-size:12px;font-weight:600;letter-spacing:.3px}
+    .ch-section-head:hover{color:#7aa2d5}
 
     /* LLM capture list */
     #llm-captures-list{display:flex;flex-direction:column;gap:4px;padding:8px 6px !important}
@@ -1417,20 +1426,107 @@
 
     function channelIcon(channel) {
       const c = String(channel || '').toLowerCase();
+      if (c === 'yach') return '🔵';
       if (c === 'feishu' || c === 'lark') return '🪶';
       if (c === 'telegram') return '✈';
       if (c === 'slack') return '💬';
       if (c === 'discord') return '🎮';
       if (c === 'wechat') return '💚';
       if (c === 'heartbeat') return '💓';
+      if (c === 'openai') return '🤖';
+      if (c === 'webchat') return '🌐';
       return '📡';
+    }
+
+    let systemChannelsExpanded = false;
+
+    function isSystemChannel(entry) {
+      const ch = (entry.channel || '').toLowerCase();
+      if (ch === 'heartbeat') return true;
+      if (ch === 'openai' && (entry.senderId === 'unknown' || entry.chatType === 'unknown')) return true;
+      if (ch === 'webchat' && (entry.senderId === 'unknown' || entry.chatType === 'unknown')) return true;
+      return false;
+    }
+
+    function agentTagClass(agentId) {
+      const id = (agentId || '').toLowerCase();
+      if (id === 'main') return 'agent-tag agent-tag-main';
+      if (id === 'nanbosirui') return 'agent-tag agent-tag-nanbosirui';
+      if (id === 'nanbosuikesi') return 'agent-tag agent-tag-nanbosuikesi';
+      return 'agent-tag agent-tag-default';
+    }
+
+    function renderChannelRow(entry, container) {
+      const { agentId, sessionId, channel, chatType, senderId, senderLabel, accountId, updatedAt } = entry;
+      const icon = channelIcon(channel);
+      const stateKey = makeKey(agentId, sessionId || '');
+      const live = sessionId ? state.get(stateKey) : null;
+      const lastTs = live ? (live.lastTs || updatedAt) : updatedAt;
+      const lastMsg = live ? (
+        live.textPreview
+          ? String(live.textPreview).replace(/\s+/g, ' ').trim().slice(0, 80)
+          : (live.toolName ? `工具: ${live.toolName}` : '')
+      ) : '';
+      const tokens = live?.totalTokens ? fmtCompact((live.totalTokens.input||0)+(live.totalTokens.output||0)) : '-';
+      const isActive = live && live.updatedAt && (Date.now() - live.updatedAt < 8000);
+      const activeDot = isActive ? '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#35c46a;margin-right:4px;flex-shrink:0"></span>' : '';
+
+      const chatTypeBadge = chatType === 'direct'
+        ? `<span class="badge" style="border-color:#234a86;background:rgba(58,120,255,.12);color:#a9c7ff">私聊</span>`
+        : chatType === 'group'
+          ? `<span class="badge" style="border-color:#3a5a3a;background:rgba(76,175,80,.12);color:#a5d6a7">群聊</span>`
+          : `<span class="badge">${escHtml(chatType)}</span>`;
+
+      const nickname = getNickname(channel, chatType, senderId);
+      const nkKey = nicknameKey(channel, chatType, senderId);
+      const isEditingNk = editingNicknameKey === nkKey;
+      const displayName = nickname || senderLabel || senderId;
+      const rawId = senderLabel || senderId;
+
+      let nameCell;
+      if (isEditingNk) {
+        nameCell = `
+          <div class="row" style="gap:4px;min-width:0;flex-wrap:nowrap">
+            ${activeDot}
+            <input id="active-nickname-input" type="text" value="${escHtml(nickname || '')}" placeholder="${escHtml(rawId)}"
+              style="flex:1;min-width:0;background:#0b0f14;border:1px solid #3a78ff;color:#e6eef8;border-radius:4px;padding:2px 6px;font-size:12px;font-family:inherit"
+              onkeydown="if(event.key==='Enter'){saveNickname('${escHtml(channel)}','${escHtml(chatType)}','${escHtml(senderId)}',this.value)}else if(event.key==='Escape'){cancelEditNickname()}" />
+            <button class="btn-link" style="padding:2px 6px" onclick="saveNickname('${escHtml(channel)}','${escHtml(chatType)}','${escHtml(senderId)}',document.getElementById('active-nickname-input').value)">✓</button>
+            <button class="btn-archive" style="padding:2px 6px" onclick="cancelEditNickname()">✕</button>
+          </div>`;
+      } else {
+        nameCell = `
+          <div class="row" style="gap:5px;min-width:0;flex-wrap:nowrap">
+            ${activeDot}
+            <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${nickname ? 'color:#cfe3ff;font-weight:600' : ''}" title="${escHtml(rawId)}">${escHtml(displayName)}</span>
+            ${nickname ? `<span class="mono" style="color:#5c6b7f;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(rawId)}">${escHtml(rawId.length > 12 ? rawId.slice(0,12)+'…' : rawId)}</span>` : ''}
+            <button class="btn-archive" style="padding:1px 5px;font-size:11px;flex-shrink:0" title="编辑备注" onclick="startEditNickname('${escHtml(channel)}','${escHtml(chatType)}','${escHtml(senderId)}')">✏</button>
+          </div>`;
+      }
+
+      const row = document.createElement('div');
+      row.className = 'ch-row';
+      row.innerHTML = `
+        <span style="font-size:15px;text-align:center">${icon}</span>
+        ${nameCell}
+        <div class="row" style="gap:5px;flex-wrap:nowrap">
+          <span class="${agentTagClass(agentId)}">${escHtml(agentId)}</span>
+          ${chatTypeBadge}
+        </div>
+        <span class="badge" title="总 token" style="justify-self:center">${tokens}</span>
+        <div class="cell-snippet" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(lastMsg)}">${escHtml(lastMsg || '—')}</div>
+        <span class="ts" style="white-space:nowrap">${lastTs ? fmtTs(lastTs) : '-'}</span>
+        <div class="row" style="gap:5px;flex-wrap:nowrap">
+          ${sessionId ? `<button class="btn-link" onclick="location.href='/activity?agent=${encodeURIComponent(agentId)}&sid=${encodeURIComponent(sessionId)}'">历史</button>` : ''}
+          ${sessionId ? `<button class="btn-copy" onclick="copySessionDetail('${escHtml(makeKey(agentId, sessionId))}')">复制</button>` : ''}
+        </div>
+      `;
+      container.appendChild(row);
     }
 
     function renderChannels() {
       const grid = document.getElementById('grid');
-      // Save scroll
-      const scrollMap = new Map();
-      grid.querySelectorAll('[data-scroll-id]').forEach(el => scrollMap.set(el.dataset.scrollId, el.scrollTop));
+      const prevScroll = grid.scrollTop;
       grid.innerHTML = '';
 
       if (!channelData.length) {
@@ -1438,126 +1534,45 @@
         return;
       }
 
-      // 按 agentId → channel 分组
-      const byAgent = new Map();
-      for (const entry of channelData) {
-        const aid = entry.agentId || 'main';
-        if (!byAgent.has(aid)) byAgent.set(aid, new Map());
-        const byChannel = byAgent.get(aid);
-        const ch = entry.channel || 'unknown';
-        if (!byChannel.has(ch)) byChannel.set(ch, []);
-        byChannel.get(ch).push(entry);
+      // 分组 + 按时间降序
+      const sorted = [...channelData].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      const normal = sorted.filter(e => !isSystemChannel(e));
+      const system = sorted.filter(e => isSystemChannel(e));
+
+      // 正常频道 — 扁平列表
+      const normalBlock = document.createElement('div');
+      normalBlock.style.cssText = 'border:1px solid #1c2834;border-radius:10px;background:#0e1621;overflow:hidden';
+      for (const entry of normal) {
+        renderChannelRow(entry, normalBlock);
       }
+      if (normal.length === 0) {
+        normalBlock.innerHTML = '<div class="mono" style="padding:16px;color:#5c6b7f">暂无对话</div>';
+      }
+      grid.appendChild(normalBlock);
 
-      for (const [agentId, byChannel] of byAgent) {
-        const agentBlock = document.createElement('div');
-        agentBlock.className = 'agent-block';
-        agentBlock.innerHTML = `
-          <div class="agent-head">
-            <div class="badge">Agent</div>
-            <div class="mono">${escHtml(agentId)}</div>
-            <div class="badge">频道数</div>
-            <div class="mono">${byChannel.size}</div>
-          </div>
-        `;
+      // 系统/测试频道 — 可折叠
+      if (system.length > 0) {
+        const sysWrap = document.createElement('div');
+        sysWrap.style.cssText = 'margin-top:4px';
 
-        for (const [channel, entries] of byChannel) {
-          const icon = channelIcon(channel);
-          const chBlock = document.createElement('div');
-          chBlock.style.cssText = 'border:1px solid #1c2834;border-radius:8px;background:#0b0f14;padding:10px;margin-top:8px';
+        const sysHead = document.createElement('div');
+        sysHead.className = 'ch-section-head';
+        sysHead.innerHTML = `<span style="transition:transform .2s;transform:rotate(${systemChannelsExpanded ? '90' : '0'}deg)">▶</span> 系统 / 测试 <span class="badge" style="font-weight:400">${system.length}</span>`;
+        sysHead.onclick = () => { systemChannelsExpanded = !systemChannelsExpanded; renderChannels(); };
+        sysWrap.appendChild(sysHead);
 
-          const chHead = document.createElement('div');
-          chHead.className = 'row';
-          chHead.style.cssText = 'gap:10px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #1c2834';
-          chHead.innerHTML = `
-            <span style="font-size:16px">${escHtml(icon)}</span>
-            <span class="title">${escHtml(channel)}</span>
-            <span class="badge">${entries.length} 个对话者</span>
-          `;
-          chBlock.appendChild(chHead);
-
-          // 每个 sender 一行
-          for (const entry of entries) {
-            const { sessionId, chatType, senderId, senderLabel, accountId, updatedAt, sessionKey } = entry;
-            // 从 state 取实时数据
-            const stateKey = makeKey(agentId, sessionId || '');
-            const live = sessionId ? state.get(stateKey) : null;
-            const lastTs = live ? (live.lastTs || updatedAt) : updatedAt;
-            const lastMsg = live ? (
-              live.textPreview
-                ? String(live.textPreview).replace(/\s+/g, ' ').trim().slice(0, 80)
-                : (live.toolName ? `工具: ${live.toolName}` : '')
-            ) : '';
-            const tokens = live?.totalTokens ? fmtCompact((live.totalTokens.input||0)+(live.totalTokens.output||0)) : '-';
-            const isActive = live && live.updatedAt && (Date.now() - live.updatedAt < 8000);
-            const activeDot = isActive ? '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#35c46a;margin-right:6px"></span>' : '';
-
-            // chatType badge 颜色
-            const chatTypeBadge = chatType === 'direct'
-              ? `<span class="badge" style="border-color:#234a86;background:rgba(58,120,255,.12);color:#a9c7ff">${escHtml(chatType)}</span>`
-              : `<span class="badge" style="border-color:#3a5a3a;background:rgba(76,175,80,.12);color:#a5d6a7">${escHtml(chatType)}</span>`;
-
-            const nickname = getNickname(channel, chatType, senderId);
-            const nkKey = nicknameKey(channel, chatType, senderId);
-            const isEditingNk = editingNicknameKey === nkKey;
-            const displayName = nickname || senderLabel || senderId;
-            const rawId = senderLabel || senderId;
-
-            let senderCell;
-            if (isEditingNk) {
-              senderCell = `
-                <div class="row" style="gap:4px;min-width:0;flex-wrap:nowrap">
-                  ${activeDot}
-                  <input id="active-nickname-input"
-                    type="text"
-                    value="${escHtml(nickname || '')}"
-                    placeholder="${escHtml(rawId)}"
-                    style="flex:1;min-width:0;background:#0b0f14;border:1px solid #3a78ff;color:#e6eef8;border-radius:4px;padding:2px 6px;font-size:12px;font-family:inherit"
-                    onkeydown="if(event.key==='Enter'){saveNickname('${escHtml(channel)}','${escHtml(chatType)}','${escHtml(senderId)}',this.value)}else if(event.key==='Escape'){cancelEditNickname()}"
-                  />
-                  <button class="btn-link" style="padding:2px 6px" onclick="saveNickname('${escHtml(channel)}','${escHtml(chatType)}','${escHtml(senderId)}',document.getElementById('active-nickname-input').value)">✓</button>
-                  <button class="btn-archive" style="padding:2px 6px" onclick="cancelEditNickname()">✕</button>
-                </div>`;
-            } else {
-              senderCell = `
-                <div class="row" style="gap:6px;min-width:0;flex-wrap:nowrap">
-                  ${activeDot}
-                  <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${nickname ? 'color:#cfe3ff;font-weight:600' : ''}" title="${escHtml(rawId)}">${escHtml(displayName)}</span>
-                  ${nickname ? `<span class="mono" style="color:#5c6b7f;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(rawId)}">${escHtml(rawId.length > 12 ? rawId.slice(0,12)+'…' : rawId)}</span>` : ''}
-                  <button class="btn-archive" style="padding:1px 5px;font-size:11px;flex-shrink:0" title="编辑备注" onclick="startEditNickname('${escHtml(channel)}','${escHtml(chatType)}','${escHtml(senderId)}')">✏</button>
-                </div>`;
-            }
-
-            const row = document.createElement('div');
-            row.style.cssText = 'display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) minmax(0,3fr) minmax(0,1fr) auto;gap:10px;align-items:center;padding:8px 6px;border-bottom:1px dashed #1c2834;font-size:12px';
-            row.innerHTML = `
-              ${senderCell}
-              <div class="row" style="gap:6px">
-                ${chatTypeBadge}
-                ${accountId && accountId !== 'default' ? `<span class="badge">${escHtml(accountId)}</span>` : ''}
-              </div>
-              <div class="cell-snippet" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(lastMsg)}">${escHtml(lastMsg || '—')}</div>
-              <div class="row" style="gap:6px">
-                <span class="badge" title="总 token">${tokens}</span>
-                <span class="ts">${lastTs ? fmtTs(lastTs) : '-'}</span>
-              </div>
-              <div class="row" style="gap:6px">
-                ${sessionId ? `<button class="btn-link" onclick="location.href='/activity?agent=${encodeURIComponent(agentId)}&sid=${encodeURIComponent(sessionId)}'">历史</button>` : ''}
-                ${sessionId ? `<button class="btn-copy" onclick="copySessionDetail('${escHtml(makeKey(agentId, sessionId))}')">复制</button>` : ''}
-              </div>
-            `;
-            chBlock.appendChild(row);
+        if (systemChannelsExpanded) {
+          const sysBlock = document.createElement('div');
+          sysBlock.style.cssText = 'border:1px solid #1c2834;border-radius:10px;background:#0e1621;overflow:hidden;opacity:.7';
+          for (const entry of system) {
+            renderChannelRow(entry, sysBlock);
           }
-          agentBlock.appendChild(chBlock);
+          sysWrap.appendChild(sysBlock);
         }
-        grid.appendChild(agentBlock);
+        grid.appendChild(sysWrap);
       }
 
-      // Restore scroll
-      grid.querySelectorAll('[data-scroll-id]').forEach(el => {
-        const saved = scrollMap.get(el.dataset.scrollId);
-        if (saved !== undefined) el.scrollTop = saved;
-      });
+      grid.scrollTop = prevScroll;
     }
 
     async function pollSnapshot(){
@@ -1623,7 +1638,7 @@
       setInterval(() => refreshDeletedList(false).then(() => render()), 5000);
       // 同时尝试建立 SSE（若不可用则忽略，由快照兜底）
       const es=new EventSource('/events');
-      es.onmessage=(ev)=>{try{const e=JSON.parse(ev.data);if(e.type==='llm-capture'){handleLlmCaptureEvent(e)}else{upsert(e, false)}}catch{}};
+      es.onmessage=(ev)=>{try{const e=JSON.parse(ev.data);if(e.type==='llm-capture'){handleLlmCaptureEvent(e)}else if(e.type==='bridge-event'){/* handled by /bridge.html */}else{upsert(e, false)}}catch{}};
       es.onerror=()=>{};
 
       window.addEventListener('resize', ()=>render());
@@ -1640,6 +1655,7 @@
         <button id="btn-channel-view" class="toggle-archived" onclick="toggleChannelView()">频道视图</button>
         <button class="toggle-archived" onclick="openAutoDeleteSettings()">自动软删设置</button>
         <button class="toggle-archived" onclick="toggleLlmCapturesPanel()" style="border-color:#5e2a86;color:#e1bee7">LLM Requests</button>
+        <a href="/bridge.html" class="toggle-archived" style="border-color:#2e7d32;color:#a5d6a7;text-decoration:none">Bridge</a>
         <button id="btn-toggle-deleted" class="toggle-archived" onclick="toggleDeletedPanel()">已删除</button>
         <button id="btn-toggle-archived" class="toggle-archived" onclick="toggleShowArchived()">显示归档</button>
       </div>

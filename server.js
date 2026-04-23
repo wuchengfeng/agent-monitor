@@ -25,6 +25,11 @@ const MAX_CAPTURE_BYTES = 50 * 1024 * 1024;
 let captureIdCounter = 0;
 let captureTotalBytes = 0;
 
+// --- Bridge Event ring buffer (in-memory) ---
+const bridgeEvents = [];
+const MAX_BRIDGE_EVENTS = 500;
+let bridgeEventIdCounter = 0;
+
 const MONITOR_SETTINGS_FILE = path.join(BASE_ROOT, 'agent-monitor', 'monitor_settings.json');
 const CHANNEL_NICKNAMES_FILE = path.join(BASE_ROOT, 'agent-monitor', 'channel_nicknames.json');
 
@@ -1153,6 +1158,44 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.end(JSON.stringify(found));
+    return;
+  }
+
+  // --- Bridge Event API ---
+  if (parsed.pathname === '/api/bridge-event' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { if (body.length < 512 * 1024) body += c; });
+    req.on('end', () => {
+      try {
+        const ev = JSON.parse(body);
+        ev._id = ++bridgeEventIdCounter;
+        while (bridgeEvents.length >= MAX_BRIDGE_EVENTS) bridgeEvents.shift();
+        bridgeEvents.push(ev);
+        // SSE broadcast
+        const notify = { type: 'bridge-event', ...ev };
+        for (const c of clients) sendEvent(c, notify);
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.end(JSON.stringify({ ok: true, id: ev._id }));
+      } catch (e) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: String(e.message || e) }));
+      }
+    });
+    return;
+  }
+
+  if (parsed.pathname === '/api/bridge-events' && req.method === 'GET') {
+    const limit = Math.min(parseInt(parsed.query.limit) || 200, 500);
+    const filterSession = parsed.query.sessionId || null;
+    const results = [];
+    for (let i = bridgeEvents.length - 1; i >= 0 && results.length < limit; i--) {
+      if (filterSession && bridgeEvents[i].sessionId !== filterSession) continue;
+      results.push(bridgeEvents[i]);
+    }
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.end(JSON.stringify(results));
     return;
   }
 
