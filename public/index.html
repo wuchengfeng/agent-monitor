@@ -103,6 +103,36 @@
       background:#101b27;
       transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease,background .16s ease;
     }
+    /* --- Topology View --- */
+    #topo-wrapper{display:grid;grid-template-columns:1fr 380px;gap:0;height:100%;min-height:0}
+    #topo-canvas-wrap{position:relative;overflow:hidden;background:#080c10;border:1px solid #1c2834;border-radius:10px}
+    #topo-canvas{display:block}
+    .topo-controls{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;gap:4px;z-index:2}
+    .topo-controls button{width:30px;height:30px;border:1px solid #2a3e52;border-radius:6px;background:#0e1621;color:#e6eef8;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+    .topo-controls button:hover{background:#1c2834}
+    .topo-legend{position:absolute;bottom:10px;left:10px;background:rgba(14,22,33,.92);border:1px solid #1c2834;border-radius:8px;padding:8px 12px;font-size:11px;color:#a8b3bf;z-index:2;display:flex;flex-direction:column;gap:4px}
+    .topo-legend-row{display:flex;align-items:center;gap:8px}
+    .topo-legend-line{width:24px;height:2px;border-radius:1px}
+    .topo-legend-circle{width:12px;height:12px;border-radius:50%}
+    #topo-side{border:1px solid #1c2834;border-radius:10px;background:#0e1621;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+    .topo-tabs{display:flex;border-bottom:1px solid #1c2834;flex:0 0 auto}
+    .topo-tab{flex:1;padding:10px 12px;text-align:center;font-size:13px;font-weight:600;color:#7aa2d5;cursor:pointer;border-bottom:2px solid transparent;transition:all .15s}
+    .topo-tab:hover{background:#0b0f14}
+    .topo-tab.active{color:#cfe3ff;border-bottom-color:#3a78ff;background:#0b0f14}
+    #topo-panel{flex:1;min-height:0;overflow:auto;padding:12px}
+    .topo-section{margin-bottom:14px}
+    .topo-section-title{font-size:11px;font-weight:700;color:#7aa2d5;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+    .topo-kv{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:12px}
+    .topo-kv-label{color:#7aa2d5}
+    .topo-kv-value{color:#e6eef8;word-break:break-all}
+    .topo-session-list{display:flex;flex-direction:column;gap:3px}
+    .topo-session-row{padding:6px 8px;border:1px solid #1c2834;border-radius:6px;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:background .12s}
+    .topo-session-row:hover{background:#0b0f14}
+    .topo-session-row.active{border-color:#3a78ff;background:rgba(58,120,255,.1)}
+    .topo-edge-list{display:flex;flex-direction:column;gap:4px}
+    .topo-edge-row{padding:5px 8px;border:1px solid #1c2834;border-radius:6px;font-size:11px;color:#a8b3bf}
+    .topo-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+
     #llm-captures-list .llm-cap-row:hover{
       transform:translateX(4px);
       background:#152434 !important;
@@ -138,6 +168,22 @@
     let llmCapturesPanelOpen = false;
     let selectedCaptureId = null;
     let llmCaptureDetailExpanded = new Set(); // track which sections are expanded
+
+    // --- Topology View state ---
+    let topologyViewActive = false;
+    let topologyData = null; // { agents, sessions, edges, version }
+    let topoNodes = []; // computed layout nodes { id, type:'agent'|'session', x, y, r, color, label, data }
+    let topoEdges = []; // computed layout edges { source, target, type, meta, color }
+    let topoSelectedNode = null; // { type, id }
+    let topoSidePanelTab = 'agent'; // 'agent' | 'session'
+    let topoPan = { x: 0, y: 0 };
+    let topoZoom = 1;
+    let topoHoverNode = null;
+    let topoDragging = null;
+    let topoPanStart = null;
+    let topoAnimFrame = null;
+    let topoPollingInterval = null;
+    let topoEdgeDebounce = null;
 
     function saveArchived() {
       localStorage.setItem('agent_monitor_archived', JSON.stringify([...archived]));
@@ -1248,6 +1294,10 @@
       });
     }
     function _doRender(){
+      if (topologyViewActive) {
+        renderTopologyView();
+        return;
+      }
       if (channelViewActive) {
         // 用户正在编辑备注时，跳过自动重渲（防止 input 失去焦点）
         if (editingNicknameKey) return;
@@ -1407,11 +1457,638 @@
       render();
     }
 
+    // =============================================
+    // ========== TOPOLOGY VIEW CORE =============
+    // =============================================
+
+    const AGENT_COLORS = {
+      main: { fill: '#1a3a66', stroke: '#3a78ff', text: '#a9c7ff' },
+      nanbosirui: { fill: '#1a4a33', stroke: '#4caf50', text: '#a5d6a7' },
+      nanbosuikesi: { fill: '#3d1a55', stroke: '#9c27b0', text: '#e1bee7' },
+      _default: { fill: '#2a2a2a', stroke: '#777', text: '#bbb' },
+    };
+    function agentColor(id) { return AGENT_COLORS[id] || AGENT_COLORS._default; }
+
+    const CHANNEL_COLORS = {
+      feishu: '#4a6fa5', yach: '#3a78ff', telegram: '#2196f3', slack: '#e91e63',
+      webchat: '#26a69a', openai: '#10a37f', heartbeat: '#ff7043', subagent: '#9c27b0',
+      main: '#546e7a', _default: '#455a64',
+    };
+    function sessionNodeColor(ch) { return CHANNEL_COLORS[ch] || CHANNEL_COLORS._default; }
+
+    async function pollTopology() {
+      try {
+        const r = await fetch('/api/topology', { cache: 'no-store' });
+        if (!r.ok) return;
+        topologyData = await r.json();
+        computeTopologyLayout();
+        if (topologyViewActive) renderTopoCanvas();
+      } catch {}
+    }
+
+    function computeTopologyLayout() {
+      if (!topologyData) return;
+      const { agents, sessions, edges } = topologyData;
+      const canvas = document.getElementById('topo-canvas');
+      if (!canvas) return;
+      const W = canvas.width / (window.devicePixelRatio || 1);
+      const H = canvas.height / (window.devicePixelRatio || 1);
+      const cx = W / 2, cy = H / 2;
+      const agentR = Math.min(W, H) * 0.28;
+      const nodes = [];
+      const nodeMap = new Map(); // id -> node
+
+      // Place agent nodes in a circle
+      const sortedAgents = [...agents].sort((a, b) => a.id.localeCompare(b.id));
+      sortedAgents.forEach((ag, i) => {
+        const angle = (2 * Math.PI * i) / Math.max(sortedAgents.length, 1) - Math.PI / 2;
+        const x = cx + agentR * Math.cos(angle);
+        const y = cy + agentR * Math.sin(angle);
+        const c = agentColor(ag.id);
+        const node = { id: `agent:${ag.id}`, type: 'agent', x, y, r: 34, color: c.fill, stroke: c.stroke, textColor: c.text, label: ag.id, data: ag, fixed: true };
+        nodes.push(node);
+        nodeMap.set(node.id, node);
+      });
+
+      // Place session nodes clustered around their agent
+      for (const ag of sortedAgents) {
+        const agNode = nodeMap.get(`agent:${ag.id}`);
+        if (!agNode) continue;
+        const agSessions = sessions.filter(s => s.agentId === ag.id);
+        const clusterR = 40 + Math.sqrt(agSessions.length) * 22;
+        agSessions.forEach((sess, i) => {
+          const angle = (2 * Math.PI * i) / Math.max(agSessions.length, 1);
+          const x = agNode.x + clusterR * Math.cos(angle);
+          const y = agNode.y + clusterR * Math.sin(angle);
+          const ch = sess.channel || 'unknown';
+          const node = {
+            id: `session:${sess.id}`,
+            type: 'session',
+            x, y, r: 9,
+            color: sessionNodeColor(ch),
+            stroke: sess.isActive ? sessionNodeColor(ch) : '#333',
+            textColor: '#a8b3bf',
+            label: sess.isSubagent ? 'sub' : (ch.length > 8 ? ch.slice(0, 7) + '..' : ch),
+            data: sess,
+            parentAgent: ag.id,
+            fixed: false,
+          };
+          nodes.push(node);
+          nodeMap.set(node.id, node);
+          // Also map by session key for edge resolution
+          if (sess.key) nodeMap.set(`key:${sess.key}`, node);
+        });
+      }
+
+      // Force simulation for session overlap prevention (50 iterations)
+      for (let iter = 0; iter < 50; iter++) {
+        for (let i = 0; i < nodes.length; i++) {
+          if (nodes[i].fixed) continue;
+          for (let j = i + 1; j < nodes.length; j++) {
+            if (nodes[j].fixed && nodes[i].fixed) continue;
+            const dx = nodes[j].x - nodes[i].x;
+            const dy = nodes[j].y - nodes[i].y;
+            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            const minDist = nodes[i].r + nodes[j].r + 8;
+            if (dist < minDist) {
+              const force = (minDist - dist) / dist * 0.5;
+              const fx = dx * force, fy = dy * force;
+              if (!nodes[i].fixed) { nodes[i].x -= fx; nodes[i].y -= fy; }
+              if (!nodes[j].fixed) { nodes[j].x += fx; nodes[j].y += fy; }
+            }
+          }
+          // Spring toward parent agent
+          const parent = nodeMap.get(`agent:${nodes[i].parentAgent}`);
+          if (parent) {
+            const dx = nodes[i].x - parent.x;
+            const dy = nodes[i].y - parent.y;
+            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            const agSess = sessions.filter(s => s.agentId === nodes[i].parentAgent);
+            const targetDist = 40 + Math.sqrt(agSess.length) * 22;
+            const springForce = (dist - targetDist) * 0.02;
+            nodes[i].x -= (dx / dist) * springForce;
+            nodes[i].y -= (dy / dist) * springForce;
+          }
+          // Boundary containment
+          const pad = 20;
+          nodes[i].x = Math.max(pad, Math.min(W - pad, nodes[i].x));
+          nodes[i].y = Math.max(pad, Math.min(H - pad, nodes[i].y));
+        }
+      }
+
+      // Build layout edges
+      const layoutEdges = [];
+      for (const edge of edges) {
+        let srcNode = null, tgtNode = null;
+        // Try to resolve by session
+        if (edge.sourceSession) srcNode = nodeMap.get(`session:${edge.sourceSession}`);
+        if (!srcNode && edge.sourceSessionKey) srcNode = nodeMap.get(`key:${edge.sourceSessionKey}`);
+        if (!srcNode && edge.sourceAgent) srcNode = nodeMap.get(`agent:${edge.sourceAgent}`);
+        if (edge.targetSession) tgtNode = nodeMap.get(`session:${edge.targetSession}`);
+        if (!tgtNode && edge.targetSessionKey) tgtNode = nodeMap.get(`key:${edge.targetSessionKey}`);
+        if (!tgtNode && edge.targetAgent) tgtNode = nodeMap.get(`agent:${edge.targetAgent}`);
+        if (srcNode && tgtNode && srcNode !== tgtNode) {
+          let color = '#3a78ff'; // send = blue
+          if (edge.type === 'spawn' || edge.type === 'spawn-result') color = '#9c27b0'; // spawn = purple
+          if (edge.meta && edge.meta.status === 'error') color = '#f44336';
+          if (edge.meta && edge.meta.status === 'forbidden') color = '#ff9800';
+          if (edge.meta && edge.meta.status === 'timeout') color = '#ff9800';
+          layoutEdges.push({ source: srcNode, target: tgtNode, type: edge.type, meta: edge.meta || {}, color });
+        }
+      }
+
+      topoNodes = nodes;
+      topoEdges = layoutEdges;
+    }
+
+    function renderTopoCanvas() {
+      const canvas = document.getElementById('topo-canvas');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const W = canvas.width / dpr;
+      const H = canvas.height / dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+      ctx.save();
+      ctx.translate(topoPan.x, topoPan.y);
+      ctx.scale(topoZoom, topoZoom);
+
+      // Draw agent-to-session connecting lines
+      for (const n of topoNodes) {
+        if (n.type !== 'session') continue;
+        const parent = topoNodes.find(p => p.id === `agent:${n.parentAgent}`);
+        if (!parent) continue;
+        ctx.beginPath();
+        ctx.moveTo(parent.x, parent.y);
+        ctx.lineTo(n.x, n.y);
+        ctx.strokeStyle = 'rgba(58,90,120,.25)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Draw relationship edges (curved bezier with arrowheads)
+      for (const e of topoEdges) {
+        const sx = e.source.x, sy = e.source.y;
+        const tx = e.target.x, ty = e.target.y;
+        const mx = (sx + tx) / 2, my = (sy + ty) / 2;
+        // offset control point perpendicular to the line
+        const dx = tx - sx, dy = ty - sy;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        const nx = -dy / len, ny = dx / len;
+        const cpx = mx + nx * len * 0.2, cpy = my + ny * len * 0.2;
+
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.quadraticCurveTo(cpx, cpy, tx, ty);
+        ctx.strokeStyle = e.color;
+        ctx.lineWidth = 2;
+        if (e.meta.status === 'forbidden') ctx.setLineDash([4, 4]);
+        else ctx.setLineDash([]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Arrowhead at target
+        const t = 0.85; // position along curve
+        const ax = (1-t)*(1-t)*sx + 2*(1-t)*t*cpx + t*t*tx;
+        const ay = (1-t)*(1-t)*sy + 2*(1-t)*t*cpy + t*t*ty;
+        const adx = tx - ax, ady = ty - ay;
+        const aLen = Math.sqrt(adx*adx + ady*ady) || 1;
+        const arrowSize = 8;
+        const arrAngle = Math.PI / 6;
+        const ux = adx / aLen, uy = ady / aLen;
+        ctx.beginPath();
+        ctx.moveTo(tx - e.target.r * ux, ty - e.target.r * uy);
+        ctx.lineTo(tx - (e.target.r + arrowSize) * ux - arrowSize * Math.sin(arrAngle) * (-uy),
+                   ty - (e.target.r + arrowSize) * uy - arrowSize * Math.sin(arrAngle) * ux);
+        ctx.lineTo(tx - (e.target.r + arrowSize) * ux + arrowSize * Math.sin(arrAngle) * (-uy),
+                   ty - (e.target.r + arrowSize) * uy + arrowSize * Math.sin(arrAngle) * ux);
+        ctx.closePath();
+        ctx.fillStyle = e.color;
+        ctx.fill();
+
+        // Edge label
+        const labelX = cpx, labelY = cpy - 8;
+        ctx.font = '10px -apple-system, sans-serif';
+        ctx.fillStyle = 'rgba(200,220,240,.6)';
+        ctx.textAlign = 'center';
+        const edgeLabel = e.type === 'spawn' ? 'spawn' : e.type === 'spawn-result' ? 'result' : e.type === 'send-incoming' ? 'recv' : 'send';
+        ctx.fillText(e.meta.status ? `${edgeLabel} (${e.meta.status})` : edgeLabel, labelX, labelY);
+      }
+
+      // Draw nodes
+      const now = Date.now();
+      for (const n of topoNodes) {
+        const isSelected = topoSelectedNode && topoSelectedNode.id === n.id;
+        const isHovered = topoHoverNode && topoHoverNode.id === n.id;
+
+        // Active pulse animation for session nodes
+        if (n.type === 'session' && n.data && n.data.isActive) {
+          const pulse = Math.sin(now / 500) * 0.3 + 0.7;
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, n.r + 4, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${hexToRgb(n.color)}, ${pulse * 0.25})`;
+          ctx.fill();
+        }
+
+        // Node circle
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+        ctx.fillStyle = n.color;
+        ctx.fill();
+        ctx.strokeStyle = isSelected ? '#fff' : isHovered ? '#aaa' : n.stroke;
+        ctx.lineWidth = isSelected ? 2.5 : isHovered ? 2 : 1.2;
+        ctx.stroke();
+
+        // Label
+        ctx.font = n.type === 'agent' ? 'bold 13px -apple-system, sans-serif' : '10px -apple-system, sans-serif';
+        ctx.fillStyle = n.textColor;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        if (n.type === 'agent') {
+          ctx.fillText(n.label, n.x, n.y);
+          // Session count below
+          ctx.font = '10px -apple-system, sans-serif';
+          ctx.fillStyle = 'rgba(200,220,240,.5)';
+          ctx.fillText(`${n.data.activeSessionCount || 0} sessions`, n.x, n.y + n.r + 12);
+          // Token count
+          const totalTok = (n.data.totalTokens ? n.data.totalTokens.input + n.data.totalTokens.output : 0);
+          if (totalTok > 0) {
+            ctx.fillText(formatCompactTokens(totalTok), n.x, n.y + n.r + 24);
+          }
+        } else {
+          ctx.fillText(n.label, n.x, n.y + n.r + 10);
+        }
+      }
+
+      ctx.restore();
+    }
+
+    function hexToRgb(hex) {
+      const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+      return result ? `${parseInt(result[1],16)},${parseInt(result[2],16)},${parseInt(result[3],16)}` : '100,100,100';
+    }
+
+    function formatCompactTokens(n) {
+      if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+      if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+      return String(n);
+    }
+
+    function startTopoAnimation() {
+      if (topoAnimFrame) return;
+      function loop() {
+        if (!topologyViewActive) { topoAnimFrame = null; return; }
+        renderTopoCanvas();
+        topoAnimFrame = requestAnimationFrame(loop);
+      }
+      topoAnimFrame = requestAnimationFrame(loop);
+    }
+
+    // --- Canvas interaction ---
+    function topoHitTest(mx, my) {
+      // Transform mouse coords through pan/zoom
+      const x = (mx - topoPan.x) / topoZoom;
+      const y = (my - topoPan.y) / topoZoom;
+      // Check nodes in reverse order (top-drawn first for hit)
+      for (let i = topoNodes.length - 1; i >= 0; i--) {
+        const n = topoNodes[i];
+        const dx = x - n.x, dy = y - n.y;
+        if (dx * dx + dy * dy <= (n.r + 4) * (n.r + 4)) return n;
+      }
+      return null;
+    }
+
+    function setupTopoCanvasEvents() {
+      const canvas = document.getElementById('topo-canvas');
+      if (!canvas || canvas._topoEventsAttached) return;
+      canvas._topoEventsAttached = true;
+
+      canvas.addEventListener('mousedown', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        const hit = topoHitTest(mx, my);
+        if (hit && !hit.fixed) {
+          topoDragging = { node: hit, offsetX: (mx - topoPan.x) / topoZoom - hit.x, offsetY: (my - topoPan.y) / topoZoom - hit.y };
+        } else if (!hit) {
+          topoPanStart = { x: topoPan.x, y: topoPan.y, mx: e.clientX, my: e.clientY };
+        }
+      });
+
+      canvas.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        if (topoDragging) {
+          topoDragging.node.x = (mx - topoPan.x) / topoZoom - topoDragging.offsetX;
+          topoDragging.node.y = (my - topoPan.y) / topoZoom - topoDragging.offsetY;
+          return;
+        }
+        if (topoPanStart) {
+          topoPan.x = topoPanStart.x + (e.clientX - topoPanStart.mx);
+          topoPan.y = topoPanStart.y + (e.clientY - topoPanStart.my);
+          return;
+        }
+        const hit = topoHitTest(mx, my);
+        topoHoverNode = hit;
+        canvas.style.cursor = hit ? 'pointer' : 'grab';
+      });
+
+      canvas.addEventListener('mouseup', (e) => {
+        if (topoDragging) { topoDragging = null; return; }
+        if (topoPanStart) {
+          const moved = Math.abs(e.clientX - topoPanStart.mx) + Math.abs(e.clientY - topoPanStart.my);
+          topoPanStart = null;
+          if (moved > 5) return; // was a pan, not click
+        }
+        // Click
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        const hit = topoHitTest(mx, my);
+        if (hit) {
+          topoSelectedNode = { type: hit.type, id: hit.id };
+          topoSidePanelTab = hit.type === 'agent' ? 'agent' : 'session';
+          renderTopoSidePanel();
+        } else {
+          topoSelectedNode = null;
+          renderTopoSidePanel();
+        }
+      });
+
+      canvas.addEventListener('mouseleave', () => {
+        topoDragging = null;
+        topoPanStart = null;
+        topoHoverNode = null;
+      });
+
+      canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        const newZoom = Math.max(0.3, Math.min(3.0, topoZoom * delta));
+        // Zoom toward mouse position
+        topoPan.x = mx - (mx - topoPan.x) * (newZoom / topoZoom);
+        topoPan.y = my - (my - topoPan.y) * (newZoom / topoZoom);
+        topoZoom = newZoom;
+      }, { passive: false });
+    }
+
+    function resizeTopoCanvas() {
+      const wrap = document.getElementById('topo-canvas-wrap');
+      const canvas = document.getElementById('topo-canvas');
+      if (!wrap || !canvas) return;
+      const dpr = window.devicePixelRatio || 1;
+      const w = wrap.clientWidth;
+      const h = wrap.clientHeight;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+      if (topologyData) { computeTopologyLayout(); renderTopoCanvas(); }
+    }
+
+    // --- Topology View Rendering ---
+    function renderTopologyView() {
+      const grid = document.getElementById('grid');
+      // Only rebuild DOM if topology wrapper doesn't exist yet
+      if (!document.getElementById('topo-wrapper')) {
+        grid.innerHTML = `
+          <div id="topo-wrapper">
+            <div id="topo-canvas-wrap">
+              <canvas id="topo-canvas"></canvas>
+              <div class="topo-controls">
+                <button onclick="topoZoom=Math.min(3,topoZoom*1.2)" title="放大">+</button>
+                <button onclick="topoZoom=Math.max(0.3,topoZoom/1.2)" title="缩小">-</button>
+                <button onclick="topoPan={x:0,y:0};topoZoom=1;if(topologyData){computeTopologyLayout();}" title="重置">R</button>
+              </div>
+              <div class="topo-legend">
+                <div class="topo-legend-row"><div class="topo-legend-line" style="background:#3a78ff"></div> send 消息</div>
+                <div class="topo-legend-row"><div class="topo-legend-line" style="background:#9c27b0"></div> spawn 子agent</div>
+                <div class="topo-legend-row"><div class="topo-legend-line" style="background:#ff9800"></div> timeout/forbidden</div>
+                <div class="topo-legend-row"><div class="topo-legend-line" style="background:#f44336"></div> error</div>
+                <div class="topo-legend-row"><div class="topo-legend-circle" style="background:#1a3a66;border:1px solid #3a78ff"></div> Agent 节点</div>
+                <div class="topo-legend-row"><div class="topo-legend-circle" style="background:#455a64;border:1px solid #777;width:8px;height:8px"></div> Session 节点</div>
+              </div>
+            </div>
+            <div id="topo-side">
+              <div class="topo-tabs">
+                <div class="topo-tab ${topoSidePanelTab==='agent'?'active':''}" onclick="topoSidePanelTab='agent';renderTopoSidePanel();document.querySelectorAll('.topo-tab').forEach((t,i)=>{t.classList.toggle('active',i===0)})">Agent</div>
+                <div class="topo-tab ${topoSidePanelTab==='session'?'active':''}" onclick="topoSidePanelTab='session';renderTopoSidePanel();document.querySelectorAll('.topo-tab').forEach((t,i)=>{t.classList.toggle('active',i===1)})">Session</div>
+              </div>
+              <div id="topo-panel"><div class="mono" style="padding:20px;color:#7aa2d5">点击节点查看详情</div></div>
+            </div>
+          </div>`;
+        // Size canvas and attach events after DOM is ready
+        requestAnimationFrame(() => {
+          resizeTopoCanvas();
+          setupTopoCanvasEvents();
+          if (topologyData) { computeTopologyLayout(); renderTopoCanvas(); }
+        });
+      }
+      // Update button states
+      const btnToggle = document.getElementById('btn-toggle-archived');
+      if (btnToggle) btnToggle.textContent = showArchived ? '隐藏归档' : `显示归档 (${archived.size})`;
+    }
+
+    function renderTopoSidePanel() {
+      const panel = document.getElementById('topo-panel');
+      if (!panel) return;
+      if (!topoSelectedNode) {
+        panel.innerHTML = '<div class="mono" style="padding:20px;color:#7aa2d5">点击节点查看详情</div>';
+        return;
+      }
+      if (topoSidePanelTab === 'agent') {
+        renderTopoAgentPanel(panel);
+      } else {
+        renderTopoSessionPanel(panel);
+      }
+    }
+
+    function renderTopoAgentPanel(panel) {
+      if (!topologyData || !topoSelectedNode) return;
+      let agentId = null;
+      if (topoSelectedNode.type === 'agent') {
+        agentId = topoSelectedNode.id.replace('agent:', '');
+      } else {
+        const sess = topologyData.sessions.find(s => `session:${s.id}` === topoSelectedNode.id);
+        if (sess) agentId = sess.agentId;
+      }
+      if (!agentId) { panel.innerHTML = '<div class="mono" style="padding:20px">未找到 Agent</div>'; return; }
+
+      const ag = topologyData.agents.find(a => a.id === agentId);
+      const agSessions = topologyData.sessions.filter(s => s.agentId === agentId);
+      const agEdges = topologyData.edges.filter(e => e.sourceAgent === agentId || e.targetAgent === agentId);
+      const sendOut = agEdges.filter(e => e.sourceAgent === agentId && (e.type === 'send'));
+      const sendIn = agEdges.filter(e => e.targetAgent === agentId && (e.type === 'send-incoming'));
+      const spawns = agEdges.filter(e => e.sourceAgent === agentId && (e.type === 'spawn'));
+      const c = agentColor(agentId);
+
+      let html = `<div class="topo-section">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <div class="badge ${agentTagClass(agentId).replace('agent-tag ','')} agent-tag" style="font-size:14px;padding:4px 10px">${agentId}</div>
+          <div class="badge" style="border-color:${ag && ag.status === 'active' ? '#4caf50' : '#555'};color:${ag && ag.status === 'active' ? '#a5d6a7' : '#888'}">${ag ? ag.status : 'unknown'}</div>
+        </div>
+      </div>`;
+
+      html += `<div class="topo-section"><div class="topo-section-title">概览</div><div class="topo-kv">`;
+      html += `<div class="topo-kv-label">Sessions</div><div class="topo-kv-value">${ag ? ag.activeSessionCount : 0} active / ${ag ? ag.sessionCount : 0} total</div>`;
+      if (ag && ag.totalTokens) {
+        const total = ag.totalTokens.input + ag.totalTokens.output;
+        html += `<div class="topo-kv-label">Tokens</div><div class="topo-kv-value">${formatCompactTokens(ag.totalTokens.input)} in / ${formatCompactTokens(ag.totalTokens.output)} out (${formatCompactTokens(total)} total)</div>`;
+      }
+      html += `<div class="topo-kv-label">Send 发出</div><div class="topo-kv-value">${sendOut.length}</div>`;
+      html += `<div class="topo-kv-label">Send 收到</div><div class="topo-kv-value">${sendIn.length}</div>`;
+      html += `<div class="topo-kv-label">Spawn</div><div class="topo-kv-value">${spawns.length}</div>`;
+      html += `</div></div>`;
+
+      // Channels
+      const channels = [...new Set(agSessions.map(s => s.channel))];
+      html += `<div class="topo-section"><div class="topo-section-title">频道</div><div style="display:flex;flex-wrap:wrap;gap:4px">`;
+      for (const ch of channels) {
+        html += `<div class="badge" style="border-color:${sessionNodeColor(ch)};color:${sessionNodeColor(ch)}">${ch}</div>`;
+      }
+      html += `</div></div>`;
+
+      // Session list
+      html += `<div class="topo-section"><div class="topo-section-title">Sessions (${agSessions.length})</div><div class="topo-session-list">`;
+      const sortedSess = [...agSessions].sort((a, b) => (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0));
+      for (const sess of sortedSess.slice(0, 30)) {
+        const isSelected = topoSelectedNode && topoSelectedNode.id === `session:${sess.id}`;
+        html += `<div class="topo-session-row ${isSelected ? 'active' : ''}" onclick="topoSelectedNode={type:'session',id:'session:${sess.id}'};topoSidePanelTab='session';document.querySelectorAll('.topo-tab').forEach((t,i)=>t.classList.toggle('active',i===1));renderTopoSidePanel();">
+          <div class="topo-dot" style="background:${sess.isActive ? sessionNodeColor(sess.channel) : '#333'}"></div>
+          <span style="color:#7aa2d5">${sess.channel}</span>
+          <span style="color:#555;font-size:10px;margin-left:auto">${sess.id.slice(0,8)}</span>
+          ${sess.isActive ? '<span style="color:#4caf50;font-size:10px">active</span>' : '<span style="color:#555;font-size:10px">idle</span>'}
+        </div>`;
+      }
+      if (sortedSess.length > 30) html += `<div class="mono" style="padding:4px 8px">...${sortedSess.length - 30} more</div>`;
+      html += `</div></div>`;
+
+      // Edge history
+      if (agEdges.length) {
+        html += `<div class="topo-section"><div class="topo-section-title">连接关系 (${agEdges.length})</div><div class="topo-edge-list">`;
+        for (const e of agEdges.slice(-15)) {
+          const dir = e.sourceAgent === agentId ? '→' : '←';
+          const other = e.sourceAgent === agentId ? (e.targetAgent || '?') : (e.sourceAgent || '?');
+          const typeLabel = e.type === 'spawn' ? '🔀 spawn' : e.type === 'spawn-result' ? '📨 result' : e.type === 'send-incoming' ? '📩 recv' : '📤 send';
+          const status = e.meta && e.meta.status ? ` [${e.meta.status}]` : '';
+          html += `<div class="topo-edge-row">${typeLabel} ${dir} <span style="color:${agentColor(other).text}">${other}</span>${status}</div>`;
+        }
+        html += `</div></div>`;
+      }
+
+      panel.innerHTML = html;
+    }
+
+    function renderTopoSessionPanel(panel) {
+      if (!topologyData || !topoSelectedNode) return;
+      let sessData = null;
+      if (topoSelectedNode.type === 'session') {
+        const sid = topoSelectedNode.id.replace('session:', '');
+        sessData = topologyData.sessions.find(s => s.id === sid);
+      } else if (topoSelectedNode.type === 'agent') {
+        // Show first active session of this agent
+        const agentId = topoSelectedNode.id.replace('agent:', '');
+        sessData = topologyData.sessions.find(s => s.agentId === agentId && s.isActive);
+      }
+      if (!sessData) { panel.innerHTML = '<div class="mono" style="padding:20px;color:#7aa2d5">未选择 Session</div>'; return; }
+
+      const stateKey = makeKey(sessData.agentId, sessData.id);
+      const liveState = state.get(stateKey) || {};
+      const interactions = liveState.interactions || [];
+      const lastInteraction = interactions.length ? interactions[interactions.length - 1] : null;
+      const sesEdges = topologyData.edges.filter(e =>
+        e.sourceSession === sessData.id || e.targetSession === sessData.id ||
+        e.targetSessionKey === sessData.key || e.sourceSessionKey === sessData.key
+      );
+
+      let html = `<div class="topo-section">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <div class="badge ${agentTagClass(sessData.agentId).replace('agent-tag ','')} agent-tag">${sessData.agentId}</div>
+          <div class="badge" style="border-color:${sessionNodeColor(sessData.channel)};color:${sessionNodeColor(sessData.channel)}">${sessData.channel}</div>
+          ${sessData.isActive ? '<div class="badge" style="border-color:#4caf50;color:#a5d6a7">active</div>' : '<div class="badge" style="border-color:#555;color:#888">idle</div>'}
+          ${sessData.isSubagent ? '<div class="badge" style="border-color:#9c27b0;color:#e1bee7">subagent</div>' : ''}
+        </div>
+        <div class="mono" style="font-size:11px;color:#546e7a">${sessData.id}</div>
+        ${sessData.key ? `<div class="mono" style="font-size:10px;color:#455a64;margin-top:2px">${sessData.key}</div>` : ''}
+      </div>`;
+
+      // Stats
+      html += `<div class="topo-section"><div class="topo-section-title">统计</div><div class="topo-kv">`;
+      html += `<div class="topo-kv-label">Tokens In</div><div class="topo-kv-value">${formatCompactTokens(sessData.tokens.input)}</div>`;
+      html += `<div class="topo-kv-label">Tokens Out</div><div class="topo-kv-value">${formatCompactTokens(sessData.tokens.output)}</div>`;
+      html += `<div class="topo-kv-label">Total</div><div class="topo-kv-value">${formatCompactTokens(sessData.tokens.input + sessData.tokens.output)}</div>`;
+      if (liveState.model) html += `<div class="topo-kv-label">Model</div><div class="topo-kv-value">${liveState.model}</div>`;
+      if (liveState.provider) html += `<div class="topo-kv-label">Provider</div><div class="topo-kv-value">${liveState.provider}</div>`;
+      html += `<div class="topo-kv-label">Messages</div><div class="topo-kv-value">${interactions.length}</div>`;
+      html += `</div></div>`;
+
+      // Latest activity
+      if (interactions.length) {
+        html += `<div class="topo-section"><div class="topo-section-title">最近活动 (${Math.min(interactions.length, 10)})</div>`;
+        const recent = interactions.slice(-10);
+        for (const it of recent) {
+          const typeColors = { User: '#4caf50', Bot: '#3a78ff', ToolCall: '#ff9800', ToolResult: '#26a69a', Error: '#f44336', System: '#546e7a' };
+          const color = typeColors[it.type] || '#7aa2d5';
+          const text = String(it.content || '').slice(0, 100);
+          html += `<div style="padding:4px 0;border-bottom:1px dashed #1c2834;font-size:11px">
+            <span style="color:${color};font-weight:600;margin-right:6px">${it.type}</span>
+            <span style="color:#5c6b7f;font-size:10px">${fmtTimeHms(it.ts)}</span>
+            <div style="color:#a8b3bf;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(text)}</div>
+          </div>`;
+        }
+        html += `</div>`;
+      }
+
+      // Relationships
+      if (sesEdges.length) {
+        html += `<div class="topo-section"><div class="topo-section-title">连接关系</div><div class="topo-edge-list">`;
+        for (const e of sesEdges) {
+          const typeLabel = e.type === 'spawn' ? '🔀 spawn' : e.type === 'spawn-result' ? '📨 result' : e.type === 'send-incoming' ? '📩 recv' : '📤 send';
+          const other = e.sourceSession === sessData.id ? (e.targetAgent || '?') : (e.sourceAgent || '?');
+          const status = e.meta && e.meta.status ? ` [${e.meta.status}]` : '';
+          const preview = e.meta && e.meta.messagePreview ? `<div style="color:#546e7a;margin-top:2px;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(e.meta.messagePreview)}</div>` : '';
+          const task = e.meta && e.meta.taskPreview ? `<div style="color:#546e7a;margin-top:2px;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(e.meta.taskPreview)}</div>` : '';
+          html += `<div class="topo-edge-row">${typeLabel} → <span style="color:${agentColor(other).text}">${other}</span>${status}${preview}${task}</div>`;
+        }
+        html += `</div></div>`;
+      }
+
+      // Link to activity timeline
+      html += `<div class="topo-section"><a href="/activity?sid=${sessData.id}&agent=${sessData.agentId}" class="toggle-archived" style="text-decoration:none;display:inline-block">查看完整时间轴 →</a></div>`;
+
+      panel.innerHTML = html;
+    }
+
     function toggleChannelView() {
       channelViewActive = !channelViewActive;
+      if (channelViewActive) { topologyViewActive = false; updateTopoToggleBtn(); stopTopoLoop(); }
       const btn = document.getElementById('btn-channel-view');
       if (btn) btn.textContent = channelViewActive ? '会话视图' : '频道视图';
       render();
+    }
+
+    function toggleTopologyView() {
+      topologyViewActive = !topologyViewActive;
+      if (topologyViewActive) { channelViewActive = false; const cb = document.getElementById('btn-channel-view'); if (cb) cb.textContent = '频道视图'; }
+      updateTopoToggleBtn();
+      if (topologyViewActive) { startTopoLoop(); pollTopology(); }
+      else { stopTopoLoop(); }
+      render();
+    }
+    function updateTopoToggleBtn() {
+      const btn = document.getElementById('btn-topology-view');
+      if (btn) btn.textContent = topologyViewActive ? '会话视图' : '拓扑视图';
+    }
+    function startTopoLoop() {
+      stopTopoLoop();
+      topoPollingInterval = setInterval(pollTopology, 10000);
+      startTopoAnimation();
+    }
+    function stopTopoLoop() {
+      if (topoPollingInterval) { clearInterval(topoPollingInterval); topoPollingInterval = null; }
+      if (topoAnimFrame) { cancelAnimationFrame(topoAnimFrame); topoAnimFrame = null; }
     }
 
     async function pollChannels() {
@@ -1638,10 +2315,10 @@
       setInterval(() => refreshDeletedList(false).then(() => render()), 5000);
       // 同时尝试建立 SSE（若不可用则忽略，由快照兜底）
       const es=new EventSource('/events');
-      es.onmessage=(ev)=>{try{const e=JSON.parse(ev.data);if(e.type==='llm-capture'){handleLlmCaptureEvent(e)}else if(e.type==='bridge-event'){/* handled by /bridge.html */}else{upsert(e, false)}}catch{}};
+      es.onmessage=(ev)=>{try{const e=JSON.parse(ev.data);if(e.type==='llm-capture'){handleLlmCaptureEvent(e)}else if(e.type==='bridge-event'){/* handled by /bridge.html */}else if(e.type==='topology-edge'){if(topologyViewActive){clearTimeout(topoEdgeDebounce);topoEdgeDebounce=setTimeout(pollTopology,2000)}}else{upsert(e, false)}}catch{}};
       es.onerror=()=>{};
 
-      window.addEventListener('resize', ()=>render());
+      window.addEventListener('resize', ()=>{if(topologyViewActive){resizeTopoCanvas();}render();});
     });
   </script>
 </head>
@@ -1653,6 +2330,7 @@
         <a href="/heartbeat.html" class="toggle-archived" style="text-decoration:none">Heartbeat Scheduler</a>
         <button class="toggle-archived" onclick="location.href='/activity'">详细时间轴 (Activity)</button>
         <button id="btn-channel-view" class="toggle-archived" onclick="toggleChannelView()">频道视图</button>
+        <button id="btn-topology-view" class="toggle-archived" onclick="toggleTopologyView()" style="border-color:#9c27b0;color:#e1bee7">拓扑视图</button>
         <button class="toggle-archived" onclick="openAutoDeleteSettings()">自动软删设置</button>
         <button class="toggle-archived" onclick="toggleLlmCapturesPanel()" style="border-color:#5e2a86;color:#e1bee7">LLM Requests</button>
         <a href="/bridge.html" class="toggle-archived" style="border-color:#2e7d32;color:#a5d6a7;text-decoration:none">Bridge</a>

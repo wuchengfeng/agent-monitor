@@ -296,6 +296,64 @@ function parseLine(line, sessionId, agentId) {
     const resultToolName = m.toolName || null;
     const resultToolId = m.toolCallId || null;
 
+    // --- Topology relationship extraction ---
+    let sendTarget = null;
+    let sendResult = null;
+    let spawnTarget = null;
+    let spawnResult = null;
+    let provenance = null;
+
+    // sessions_send tool call
+    const sendCall = toolCalls.find(t => t.name === 'sessions_send');
+    if (sendCall && sendCall.arguments) {
+      sendTarget = {
+        sessionKey: sendCall.arguments.sessionKey || null,
+        messagePreview: safeMessageSlice(sendCall.arguments.message, 120),
+        timeoutS: sendCall.arguments.timeoutSeconds || null,
+      };
+    }
+
+    // sessions_spawn tool call
+    const spawnCall = toolCalls.find(t => t.name === 'sessions_spawn');
+    if (spawnCall && spawnCall.arguments) {
+      spawnTarget = {
+        task: safeMessageSlice(spawnCall.arguments.task, 200),
+        mode: spawnCall.arguments.mode || null,
+        timeoutS: spawnCall.arguments.runTimeoutSeconds || null,
+      };
+    }
+
+    // sessions_send / sessions_spawn tool results
+    if (resultToolName === 'sessions_send' || resultToolName === 'sessions_spawn') {
+      const resultText = contentArr.filter(c => c && c.type === 'text').map(c => c.text).join('');
+      try {
+        const parsed = JSON.parse(resultText);
+        if (resultToolName === 'sessions_send') {
+          sendResult = {
+            status: parsed.status || null,
+            sessionKey: parsed.sessionKey || null,
+            replyPreview: safeMessageSlice(parsed.reply, 120),
+          };
+        } else if (resultToolName === 'sessions_spawn') {
+          spawnResult = {
+            childSessionKey: parsed.childSessionKey || null,
+            runId: parsed.runId || null,
+            status: parsed.status || 'accepted',
+          };
+        }
+      } catch {}
+    }
+
+    // provenance on incoming messages
+    if (m.provenance && m.provenance.kind === 'inter_session') {
+      provenance = {
+        kind: m.provenance.kind,
+        sourceSessionKey: m.provenance.sourceSessionKey || null,
+        sourceTool: m.provenance.sourceTool || null,
+        sourceChannel: m.provenance.sourceChannel || null,
+      };
+    }
+
     return {
       sessionId,
       agentId,
@@ -321,6 +379,11 @@ function parseLine(line, sessionId, agentId) {
       details,
       thinkingLevel,
       cwd,
+      sendTarget,
+      sendResult,
+      spawnTarget,
+      spawnResult,
+      provenance,
     };
   } catch {
     return null;
@@ -345,6 +408,13 @@ function readNewData(filePath, agentId) {
         const event = parseLine(line, sessionId, agentId);
         if (event) {
           for (const c of clients) sendEvent(c, event);
+          // Broadcast topology-edge hint when relationship data detected
+          if (event.sendTarget || event.sendResult || event.spawnTarget || event.spawnResult || event.provenance) {
+            const topoHint = { type: 'topology-edge', agentId, sessionId, ts: event.ts };
+            for (const c of clients) sendEvent(c, topoHint);
+            // Invalidate topology cache
+            topologyCache.builtAt = 0;
+          }
         }
       }
     });
@@ -422,6 +492,173 @@ try {
     scanExistingFiles();
   });
 } catch {}
+
+// --- Topology Cache ---
+let topologyCache = { agents: [], sessions: [], edges: [], version: 0, builtAt: 0 };
+const TOPOLOGY_TTL_MS = 5000;
+
+function parseAgentFromKey(sessionKey) {
+  if (!sessionKey || typeof sessionKey !== 'string') return null;
+  const parts = sessionKey.split(':');
+  // agent:<agentId>:...
+  if (parts[0] === 'agent' && parts.length >= 2) return parts[1];
+  return null;
+}
+
+
+function buildTopology() {
+  const now = Date.now();
+  if (now - topologyCache.builtAt < TOPOLOGY_TTL_MS) return topologyCache;
+
+  const agentIds = listAgentIds();
+  const agents = [];
+  const sessions = [];
+  const edges = [];
+  const edgeDedup = new Map(); // "type:source:target" -> edge
+
+  for (const agentId of agentIds) {
+    const dir = getAgentSessionsDir(agentId);
+    const sessionsJsonPath = path.join(dir, 'sessions.json');
+    const sessionsJson = readJson(sessionsJsonPath) || {};
+
+    let agentTotalInput = 0, agentTotalOutput = 0;
+    let activeSessions = [];
+
+    // Enumerate sessions from sessions.json
+    for (const [sessionKey, meta] of Object.entries(sessionsJson)) {
+      if (!meta || typeof meta !== 'object') continue;
+      const sessionId = meta.sessionId || null;
+      if (!sessionId) continue;
+
+      const origin = meta.origin || {};
+      const dc = meta.deliveryContext || {};
+      const keyParts = sessionKey.split(':');
+
+      let channel = null, chatType = null, isSubagent = false;
+      if (keyParts.length >= 4 && keyParts[2] === 'subagent') {
+        channel = 'subagent';
+        chatType = 'subagent';
+        isSubagent = true;
+      } else if (keyParts.length >= 5) {
+        channel = keyParts[2];
+        chatType = keyParts[3];
+      } else {
+        channel = origin.surface || origin.provider || dc.channel || keyParts[2] || 'main';
+        chatType = origin.chatType || dc.chatType || null;
+      }
+
+      const fp = path.join(dir, `${sessionId}.jsonl`);
+      const isActive = fs.existsSync(fp);
+      const cached = statsCache.get(fp);
+      const tokens = cached ? { input: cached.input, output: cached.output } : { input: 0, output: 0 };
+      agentTotalInput += tokens.input;
+      agentTotalOutput += tokens.output;
+
+      if (isActive) activeSessions.push(sessionId);
+
+      sessions.push({
+        id: sessionId,
+        agentId,
+        key: sessionKey,
+        channel: channel || 'unknown',
+        chatType: chatType || 'unknown',
+        isSubagent,
+        isActive,
+        tokens,
+        label: origin.label || null,
+        model: null, // will be enriched from state if needed
+      });
+    }
+
+    agents.push({
+      id: agentId,
+      sessionCount: Object.keys(sessionsJson).length,
+      activeSessionCount: activeSessions.length,
+      totalTokens: { input: agentTotalInput, output: agentTotalOutput },
+      status: activeSessions.length > 0 ? 'active' : 'idle',
+    });
+
+    // Scan active JSONL files for relationship edges
+    for (const sid of activeSessions) {
+      const fp = path.join(dir, `${sid}.jsonl`);
+      try {
+        const data = fs.readFileSync(fp, 'utf8');
+        const lines = data.split('\n');
+        for (const line of lines) {
+          if (!line) continue;
+          // Pre-filter for performance
+          if (!line.includes('sessions_send') && !line.includes('sessions_spawn') && !line.includes('provenance')) continue;
+          const ev = parseLine(line, sid, agentId);
+          if (!ev) continue;
+
+          if (ev.sendTarget && ev.sendTarget.sessionKey) {
+            const targetAgent = parseAgentFromKey(ev.sendTarget.sessionKey);
+            const edgeKey = `send:${agentId}:${sid}:${ev.sendTarget.sessionKey}`;
+            edgeDedup.set(edgeKey, {
+              type: 'send',
+              sourceAgent: agentId,
+              sourceSession: sid,
+              targetSessionKey: ev.sendTarget.sessionKey,
+              targetAgent: targetAgent,
+              meta: { messagePreview: ev.sendTarget.messagePreview, ts: ev.ts },
+            });
+          }
+          if (ev.sendResult && ev.sendResult.sessionKey) {
+            const rKey = `send:${agentId}:${sid}:${ev.sendResult.sessionKey}`;
+            const existing = edgeDedup.get(rKey);
+            if (existing) {
+              existing.meta.status = ev.sendResult.status;
+              existing.meta.replyPreview = ev.sendResult.replyPreview;
+            }
+          }
+          if (ev.spawnResult && ev.spawnResult.childSessionKey) {
+            const childAgent = parseAgentFromKey(ev.spawnResult.childSessionKey);
+            const edgeKey = `spawn:${agentId}:${sid}:${ev.spawnResult.childSessionKey}`;
+            edgeDedup.set(edgeKey, {
+              type: 'spawn',
+              sourceAgent: agentId,
+              sourceSession: sid,
+              targetSessionKey: ev.spawnResult.childSessionKey,
+              targetAgent: childAgent || agentId,
+              meta: { status: ev.spawnResult.status, runId: ev.spawnResult.runId, ts: ev.ts },
+            });
+          }
+          if (ev.spawnTarget) {
+            // Store task preview on the most recent spawn edge for this session
+            const spawnEdges = [...edgeDedup.entries()].filter(([k]) => k.startsWith(`spawn:${agentId}:${sid}:`));
+            if (spawnEdges.length) {
+              const last = spawnEdges[spawnEdges.length - 1];
+              last[1].meta.taskPreview = ev.spawnTarget.task;
+            }
+          }
+          if (ev.provenance && ev.provenance.sourceSessionKey) {
+            const srcAgent = parseAgentFromKey(ev.provenance.sourceSessionKey);
+            const edgeKey = `${ev.provenance.sourceTool === 'subagent_announce' ? 'spawn' : 'send'}:${srcAgent}:${ev.provenance.sourceSessionKey}:agent:${agentId}`;
+            if (!edgeDedup.has(edgeKey)) {
+              edgeDedup.set(edgeKey, {
+                type: ev.provenance.sourceTool === 'subagent_announce' ? 'spawn-result' : 'send-incoming',
+                sourceAgent: srcAgent,
+                sourceSessionKey: ev.provenance.sourceSessionKey,
+                targetAgent: agentId,
+                targetSession: sid,
+                meta: { sourceTool: ev.provenance.sourceTool, sourceChannel: ev.provenance.sourceChannel, ts: ev.ts },
+              });
+            }
+          }
+        }
+      } catch {}
+    }
+  }
+
+  topologyCache = {
+    agents,
+    sessions,
+    edges: [...edgeDedup.values()],
+    version: topologyCache.version + 1,
+    builtAt: now,
+  };
+  return topologyCache;
+}
 
 function collectSnapshot(maxLinesPerFile = 30) {
   return new Promise((resolve) => {
@@ -1002,6 +1239,13 @@ const server = http.createServer(async (req, res) => {
     }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ channels }));
+    return;
+  }
+
+  if (parsed.pathname === '/api/topology') {
+    const topo = buildTopology();
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify(topo));
     return;
   }
 
