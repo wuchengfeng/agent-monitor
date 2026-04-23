@@ -575,6 +575,8 @@ function buildTopology() {
       const dc = meta.deliveryContext || {};
       const fp = path.join(dir, `${sessionId}.jsonl`);
       const isActive = fs.existsSync(fp);
+      let lastActiveTs = null;
+      if (isActive) { try { lastActiveTs = fs.statSync(fp).mtimeMs; } catch {} }
       const cached = statsCache.get(fp);
       const tokens = cached ? { input: cached.input, output: cached.output } : { input: 0, output: 0 };
       agentTotalInput += tokens.input;
@@ -633,6 +635,7 @@ function buildTopology() {
         id: sessionId,
         key: sessionKey,
         isActive,
+        lastActiveTs,
         tokens: { input: tokens.input, output: tokens.output },
         label: origin.label || null,
       });

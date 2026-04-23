@@ -367,20 +367,32 @@ export function renderTopoCanvas() {
     const isDim = hasHighlight && !isHl;
 
     if (n.type === 'session') {
+      const recentMs = 30 * 60 * 1000;
+      const shouldPulse = n.data && n.data.lastActiveTs && (now - n.data.lastActiveTs < recentMs);
       if (isHl && !isSelected) {
         ctx.save(); ctx.shadowColor = n.color; ctx.shadowBlur = 14;
         ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 2, 0, Math.PI * 2);
         ctx.fillStyle = `rgba(${hexToRgb(n.color)}, 0.35)`; ctx.fill();
         ctx.restore();
       }
-      if (n.data && n.data.isActive && !isDim) {
-        const pulse = Math.sin(now / 500) * 0.3 + 0.7;
-        ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 3, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${hexToRgb(n.color)}, ${pulse * 0.25})`; ctx.fill();
+      if (shouldPulse && !isDim) {
+        const ageMs = now - n.data.lastActiveTs;
+        const isFresh = ageMs < 5 * 60 * 1000;
+        const speed = isFresh ? 500 : 1200;
+        const pulse = Math.sin(now / speed) * 0.5 + 0.5;
+        const glowR = n.r + 6 + pulse * 8;
+        const glowColor = isFresh ? '0,230,118' : '255,183,77';
+        ctx.save();
+        ctx.shadowColor = `rgba(${glowColor},0.8)`; ctx.shadowBlur = 12 + pulse * 10;
+        ctx.beginPath(); ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${glowColor}, ${0.08 + pulse * 0.18})`; ctx.fill();
+        ctx.restore();
+        ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 3 + pulse * 3, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${glowColor}, ${0.3 + pulse * 0.5})`; ctx.lineWidth = 1.5; ctx.stroke();
       }
       ctx.globalAlpha = isDim ? 0.2 : 1;
       ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
-      ctx.fillStyle = n.data && n.data.isActive ? n.color : `rgba(${hexToRgb(n.color)}, 0.5)`;
+      ctx.fillStyle = shouldPulse ? n.color : `rgba(${hexToRgb(n.color)}, 0.4)`;
       ctx.fill();
       ctx.strokeStyle = isSelected ? '#fff' : isHl ? '#ddd' : isHovered ? '#ccc' : n.stroke;
       ctx.lineWidth = isSelected ? 2 : isHl ? 1.8 : isHovered ? 1.5 : 0.8;
