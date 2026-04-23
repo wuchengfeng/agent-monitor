@@ -494,27 +494,69 @@ try {
 } catch {}
 
 // --- Topology Cache ---
-let topologyCache = { agents: [], sessions: [], edges: [], version: 0, builtAt: 0 };
+let topologyCache = { agents: [], contacts: [], contactEdges: [], agentEdges: [], systemSummary: {}, version: 0, builtAt: 0 };
 const TOPOLOGY_TTL_MS = 5000;
 
 function parseAgentFromKey(sessionKey) {
   if (!sessionKey || typeof sessionKey !== 'string') return null;
   const parts = sessionKey.split(':');
-  // agent:<agentId>:...
   if (parts[0] === 'agent' && parts.length >= 2) return parts[1];
   return null;
 }
 
+// 读取频道昵称
+function loadChannelNicknames() {
+  return readJson(CHANNEL_NICKNAMES_FILE) || {};
+}
+
+// 判断是否为系统/匿名 session（heartbeat、openai API、webchat 无发送者）
+function classifySession(sessionKey, origin, dc) {
+  const keyParts = sessionKey.split(':');
+  const agentId = keyParts[1];
+  // heartbeat: agent:xxx:main
+  if (keyParts.length === 3 && keyParts[2] === 'main') return { type: 'system', subtype: 'heartbeat' };
+  // subagent
+  if (keyParts.length >= 4 && keyParts[2] === 'subagent') return { type: 'system', subtype: 'subagent' };
+  // openai API sessions: agent:xxx:openai:<uuid>
+  if (keyParts[2] === 'openai' && (!dc.chatType || dc.chatType === 'unknown')) return { type: 'system', subtype: 'openai-api' };
+  // webchat with unknown sender
+  if (keyParts[2] === 'webchat' && (!origin.from || origin.from === 'unknown')) return { type: 'system', subtype: 'webchat' };
+  // group chat
+  if (dc.chatType === 'group' || (keyParts.length >= 4 && keyParts[keyParts.length - 2] === 'group')) {
+    // 从 key 中提取 group id
+    // 格式: agent:agentId:yach:group:groupId 或 agent:agentId:yach:group:xxx
+    let groupId = null;
+    const groupIdx = keyParts.indexOf('group');
+    if (groupIdx >= 0 && groupIdx < keyParts.length - 1) {
+      groupId = keyParts.slice(groupIdx + 1).join(':');
+    }
+    return { type: 'group', groupId: groupId || sessionKey };
+  }
+  // DM: extract sender id
+  // 格式: agent:agentId:channel:deviceId:direct:senderId 或 agent:agentId:direct:senderId
+  let senderId = null;
+  if (keyParts.includes('direct')) {
+    const directIdx = keyParts.indexOf('direct');
+    if (directIdx < keyParts.length - 1) {
+      senderId = keyParts.slice(directIdx + 1).join(':');
+    }
+  }
+  if (!senderId) senderId = origin.from || dc.to || null;
+  if (!senderId || senderId === 'unknown') return { type: 'system', subtype: 'unknown' };
+  return { type: 'person', senderId };
+}
 
 function buildTopology() {
   const now = Date.now();
   if (now - topologyCache.builtAt < TOPOLOGY_TTL_MS) return topologyCache;
 
   const agentIds = listAgentIds();
+  const nicknames = loadChannelNicknames();
   const agents = [];
-  const sessions = [];
-  const edges = [];
-  const edgeDedup = new Map(); // "type:source:target" -> edge
+  const contactMap = new Map();  // contactId -> { id, label, type, channel, sessions[] }
+  const contactEdgeMap = new Map(); // "contactId:agentId" -> { contactId, agentId, channel, chatType, sessionIds[], tokens, isActive }
+  const agentEdgeDedup = new Map();
+  const systemCounts = { heartbeat: 0, 'openai-api': 0, webchat: 0, subagent: 0, unknown: 0 };
 
   for (const agentId of agentIds) {
     const dir = getAgentSessionsDir(agentId);
@@ -524,7 +566,6 @@ function buildTopology() {
     let agentTotalInput = 0, agentTotalOutput = 0;
     let activeSessions = [];
 
-    // Enumerate sessions from sessions.json
     for (const [sessionKey, meta] of Object.entries(sessionsJson)) {
       if (!meta || typeof meta !== 'object') continue;
       const sessionId = meta.sessionId || null;
@@ -532,42 +573,72 @@ function buildTopology() {
 
       const origin = meta.origin || {};
       const dc = meta.deliveryContext || {};
-      const keyParts = sessionKey.split(':');
-
-      let channel = null, chatType = null, isSubagent = false;
-      if (keyParts.length >= 4 && keyParts[2] === 'subagent') {
-        channel = 'subagent';
-        chatType = 'subagent';
-        isSubagent = true;
-      } else if (keyParts.length >= 5) {
-        channel = keyParts[2];
-        chatType = keyParts[3];
-      } else {
-        channel = origin.surface || origin.provider || dc.channel || keyParts[2] || 'main';
-        chatType = origin.chatType || dc.chatType || null;
-      }
-
       const fp = path.join(dir, `${sessionId}.jsonl`);
       const isActive = fs.existsSync(fp);
       const cached = statsCache.get(fp);
       const tokens = cached ? { input: cached.input, output: cached.output } : { input: 0, output: 0 };
       agentTotalInput += tokens.input;
       agentTotalOutput += tokens.output;
-
       if (isActive) activeSessions.push(sessionId);
 
-      sessions.push({
+      const keyParts = sessionKey.split(':');
+      const channel = dc.channel || origin.surface || origin.provider || keyParts[2] || 'unknown';
+      const classification = classifySession(sessionKey, origin, dc);
+
+      if (classification.type === 'system') {
+        systemCounts[classification.subtype] = (systemCounts[classification.subtype] || 0) + 1;
+        continue;
+      }
+
+      // Person or Group — create/update contact node
+      let contactId, contactLabel, contactType, contactChannel;
+      if (classification.type === 'group') {
+        contactId = `group:${classification.groupId}`;
+        contactLabel = classification.groupId;
+        // 截短群号
+        if (contactLabel.length > 16) contactLabel = contactLabel.slice(0, 14) + '..';
+        contactType = 'group';
+        contactChannel = channel;
+      } else {
+        // person — 用 senderId 去重（同一个人可能通过不同设备 account 发消息）
+        const sid = classification.senderId;
+        contactId = `person:${sid}`;
+        // 从 origin.label 或 nicknames 获取名字
+        const nKey = `${channel}:direct:${sid}`;
+        contactLabel = nicknames[nKey] || origin.label || sid;
+        contactType = 'person';
+        contactChannel = channel;
+      }
+
+      if (!contactMap.has(contactId)) {
+        contactMap.set(contactId, { id: contactId, label: contactLabel, type: contactType, channel: contactChannel, sessionCount: 0 });
+      }
+      const contact = contactMap.get(contactId);
+      contact.sessionCount++;
+      // 更新 label 如果找到了更好的名字
+      if (contactLabel !== classification.senderId && contactLabel !== classification.groupId) {
+        contact.label = contactLabel;
+      }
+
+      // Contact → Agent edge
+      const ceKey = `${contactId}:${agentId}`;
+      if (!contactEdgeMap.has(ceKey)) {
+        contactEdgeMap.set(ceKey, {
+          contactId, agentId, channel, chatType: classification.type === 'group' ? 'group' : 'direct',
+          sessions: [], tokens: { input: 0, output: 0 }, isActive: false,
+        });
+      }
+      const ce = contactEdgeMap.get(ceKey);
+      ce.sessions.push({
         id: sessionId,
-        agentId,
         key: sessionKey,
-        channel: channel || 'unknown',
-        chatType: chatType || 'unknown',
-        isSubagent,
         isActive,
-        tokens,
+        tokens: { input: tokens.input, output: tokens.output },
         label: origin.label || null,
-        model: null, // will be enriched from state if needed
       });
+      ce.tokens.input += tokens.input;
+      ce.tokens.output += tokens.output;
+      if (isActive) ce.isActive = true;
     }
 
     agents.push({
@@ -578,7 +649,7 @@ function buildTopology() {
       status: activeSessions.length > 0 ? 'active' : 'idle',
     });
 
-    // Scan active JSONL files for relationship edges
+    // Scan active JSONL files for inter-agent edges (sessions_send/sessions_spawn)
     for (const sid of activeSessions) {
       const fp = path.join(dir, `${sid}.jsonl`);
       try {
@@ -586,64 +657,37 @@ function buildTopology() {
         const lines = data.split('\n');
         for (const line of lines) {
           if (!line) continue;
-          // Pre-filter for performance
           if (!line.includes('sessions_send') && !line.includes('sessions_spawn') && !line.includes('provenance')) continue;
           const ev = parseLine(line, sid, agentId);
           if (!ev) continue;
-
           if (ev.sendTarget && ev.sendTarget.sessionKey) {
             const targetAgent = parseAgentFromKey(ev.sendTarget.sessionKey);
-            const edgeKey = `send:${agentId}:${sid}:${ev.sendTarget.sessionKey}`;
-            edgeDedup.set(edgeKey, {
-              type: 'send',
-              sourceAgent: agentId,
-              sourceSession: sid,
-              targetSessionKey: ev.sendTarget.sessionKey,
-              targetAgent: targetAgent,
+            const edgeKey = `send:${agentId}:${targetAgent}`;
+            agentEdgeDedup.set(edgeKey, {
+              type: 'send', sourceAgent: agentId, targetAgent,
               meta: { messagePreview: ev.sendTarget.messagePreview, ts: ev.ts },
             });
           }
           if (ev.sendResult && ev.sendResult.sessionKey) {
-            const rKey = `send:${agentId}:${sid}:${ev.sendResult.sessionKey}`;
-            const existing = edgeDedup.get(rKey);
-            if (existing) {
-              existing.meta.status = ev.sendResult.status;
-              existing.meta.replyPreview = ev.sendResult.replyPreview;
-            }
+            const targetAgent = parseAgentFromKey(ev.sendResult.sessionKey);
+            const rKey = `send:${agentId}:${targetAgent}`;
+            const existing = agentEdgeDedup.get(rKey);
+            if (existing) existing.meta.status = ev.sendResult.status;
           }
           if (ev.spawnResult && ev.spawnResult.childSessionKey) {
             const childAgent = parseAgentFromKey(ev.spawnResult.childSessionKey);
-            const edgeKey = `spawn:${agentId}:${sid}:${ev.spawnResult.childSessionKey}`;
-            edgeDedup.set(edgeKey, {
-              type: 'spawn',
-              sourceAgent: agentId,
-              sourceSession: sid,
-              targetSessionKey: ev.spawnResult.childSessionKey,
-              targetAgent: childAgent || agentId,
-              meta: { status: ev.spawnResult.status, runId: ev.spawnResult.runId, ts: ev.ts },
+            agentEdgeDedup.set(`spawn:${agentId}:${childAgent}`, {
+              type: 'spawn', sourceAgent: agentId, targetAgent: childAgent || agentId,
+              meta: { status: ev.spawnResult.status, ts: ev.ts },
             });
-          }
-          if (ev.spawnTarget) {
-            // Store task preview on the most recent spawn edge for this session
-            const spawnEdges = [...edgeDedup.entries()].filter(([k]) => k.startsWith(`spawn:${agentId}:${sid}:`));
-            if (spawnEdges.length) {
-              const last = spawnEdges[spawnEdges.length - 1];
-              last[1].meta.taskPreview = ev.spawnTarget.task;
-            }
           }
           if (ev.provenance && ev.provenance.sourceSessionKey) {
             const srcAgent = parseAgentFromKey(ev.provenance.sourceSessionKey);
-            const edgeKey = `${ev.provenance.sourceTool === 'subagent_announce' ? 'spawn' : 'send'}:${srcAgent}:${ev.provenance.sourceSessionKey}:agent:${agentId}`;
-            if (!edgeDedup.has(edgeKey)) {
-              edgeDedup.set(edgeKey, {
-                type: ev.provenance.sourceTool === 'subagent_announce' ? 'spawn-result' : 'send-incoming',
-                sourceAgent: srcAgent,
-                sourceSessionKey: ev.provenance.sourceSessionKey,
-                targetAgent: agentId,
-                targetSession: sid,
-                meta: { sourceTool: ev.provenance.sourceTool, sourceChannel: ev.provenance.sourceChannel, ts: ev.ts },
-              });
-            }
+            const pType = ev.provenance.sourceTool === 'subagent_announce' ? 'spawn-result' : 'send-incoming';
+            agentEdgeDedup.set(`${pType}:${srcAgent}:${agentId}`, {
+              type: pType, sourceAgent: srcAgent, targetAgent: agentId,
+              meta: { sourceTool: ev.provenance.sourceTool, ts: ev.ts },
+            });
           }
         }
       } catch {}
@@ -652,8 +696,10 @@ function buildTopology() {
 
   topologyCache = {
     agents,
-    sessions,
-    edges: [...edgeDedup.values()],
+    contacts: [...contactMap.values()],
+    contactEdges: [...contactEdgeMap.values()],
+    agentEdges: [...agentEdgeDedup.values()],
+    systemSummary: systemCounts,
     version: topologyCache.version + 1,
     builtAt: now,
   };
@@ -1246,6 +1292,22 @@ const server = http.createServer(async (req, res) => {
     const topo = buildTopology();
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify(topo));
+    return;
+  }
+
+  if (parsed.pathname === '/api/session-history') {
+    const sessionId = parsed.query && parsed.query.sid ? String(parsed.query.sid) : '';
+    const agentId = parsed.query && parsed.query.agent ? String(parsed.query.agent) : defaultAgentId;
+    if (!isValidSessionId(sessionId)) {
+      res.statusCode = 400;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'invalid sid' }));
+      return;
+    }
+    const maxLines = parsed.query && parsed.query.limit ? parseInt(parsed.query.limit, 10) : 500;
+    const out = await collectSessionHistory(sessionId, agentId, Math.min(maxLines, 5000));
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ sessionId, agentId, items: out.items, source: out.source }));
     return;
   }
 

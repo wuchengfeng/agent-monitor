@@ -92,7 +92,7 @@
   <header>
     <h1 id="title">OpenClaw Timeline</h1>
     <div class="controls">
-      <button onclick="location.href='/'">返回看板</button>
+      <button id="btn-back">返回看板</button>
       <button id="btn-timing" onclick="toggleTimingView()">Timing 分析</button>
       <button onclick="clearTimeline()">清空</button>
     </div>
@@ -116,6 +116,17 @@
     if (sid && agent) titleEl.textContent = `Agent ${displayAgentName(agent)} / Session ${sid}`;
     if (sid && !agent) titleEl.textContent = `Session Timeline: ${sid}`;
     if (!sid && agent) titleEl.textContent = `Agent Timeline: ${displayAgentName(agent)}`;
+    const fromView = params.get('from');
+    const backBtn = document.getElementById('btn-back');
+    if (fromView === 'channel') {
+      backBtn.textContent = '返回频道视图';
+      backBtn.onclick = () => { location.href = '/?view=channel'; };
+    } else if (fromView === 'topology') {
+      backBtn.textContent = '返回拓扑视图';
+      backBtn.onclick = () => { location.href = '/?view=topology'; };
+    } else {
+      backBtn.onclick = () => { location.href = '/'; };
+    }
     
     function clearTimeline() {
       timeline.innerHTML = '';
