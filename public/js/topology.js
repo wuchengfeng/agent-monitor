@@ -123,16 +123,16 @@ export function computeTopologyLayout() {
   // Vertical overlap prevention within columns
   const columns = { person: [], group: [], agent: [] };
   for (const n of nodes) { if (columns[n.column]) columns[n.column].push(n); }
-  for (let iter = 0; iter < 30; iter++) {
+  for (let iter = 0; iter < 60; iter++) {
     for (const col of Object.values(columns)) {
-      for (let i = 0; i < col.length; i++) {
-        for (let j = i + 1; j < col.length; j++) {
-          const dy = col[j].y - col[i].y;
-          const minDist = col[i].r + col[j].r + 16;
-          if (Math.abs(dy) < minDist) {
-            const push = (minDist - Math.abs(dy)) * 0.5 * (dy >= 0 ? 1 : -1);
-            col[i].y -= push; col[j].y += push;
-          }
+      col.sort((a, b) => a.y - b.y);
+      for (let i = 0; i < col.length - 1; i++) {
+        const a = col[i], b = col[i + 1];
+        const minDist = a.r + b.r + 14;
+        const dy = b.y - a.y;
+        if (dy < minDist) {
+          const push = (minDist - dy) * 0.55;
+          a.y -= push; b.y += push;
         }
       }
       for (const n of col) { n.y = Math.max(n.r + 10, Math.min(H - n.r - 10, n.y)); }
@@ -157,10 +157,16 @@ export function computeTopologyLayout() {
     if (!srcNode || !tgtNode) continue;
     const sessions = (ce.sessions || []).filter(s => !topoHiddenSessions.has(s.id));
     const count = sessions.length;
+    const edgeDx = tgtNode.x - srcNode.x;
+    const edgeDy = tgtNode.y - srcNode.y;
+    const edgeLen = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy) || 1;
+    const perpX = -edgeDy / edgeLen;
+    const perpY = edgeDx / edgeLen;
     sessions.forEach((sess, i) => {
-      const t = (i + 1) / (count + 1);
-      const x = srcNode.x + (tgtNode.x - srcNode.x) * t;
-      const y = srcNode.y + (tgtNode.y - srcNode.y) * t;
+      const t = 0.5;
+      const perpOffset = count > 1 ? (i - (count - 1) / 2) * 32 : 0;
+      const x = srcNode.x + edgeDx * t + perpX * perpOffset;
+      const y = srcNode.y + edgeDy * t + perpY * perpOffset;
       const ch = ce.channel || 'yach';
       const chColor = CHANNEL_COLORS[ch] || '#455a64';
       const tok = sess.tokens ? (sess.tokens.input || 0) + (sess.tokens.output || 0) : 0;
@@ -186,20 +192,38 @@ export function computeTopologyLayout() {
     if (saved) { n.x = saved.x; n.y = saved.y; }
   }
 
-  // Session overlap prevention (gentle)
+  // Session overlap prevention
   const sessionNodes = nodes.filter(n => n.type === 'session');
-  for (let iter = 0; iter < 20; iter++) {
+  for (let iter = 0; iter < 50; iter++) {
     for (let i = 0; i < sessionNodes.length; i++) {
       if (topoSavedPositions[sessionNodes[i].id]) continue;
       for (let j = i + 1; j < sessionNodes.length; j++) {
         const a = sessionNodes[i], b = sessionNodes[j];
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const minDist = a.r + b.r + 8;
+        let dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = a.r + b.r + 10;
         if (dist < minDist) {
-          const push = (minDist - dist) / dist * 0.4;
+          if (dist < 1) { dx = (Math.random() - 0.5) * 2; dy = (Math.random() - 0.5) * 2; }
+          const push = (minDist - dist) / dist * 0.5;
           if (!topoSavedPositions[a.id]) { a.x -= dx * push; a.y -= dy * push; }
           if (!topoSavedPositions[b.id]) { b.x += dx * push; b.y += dy * push; }
+        }
+      }
+    }
+  }
+  // Also check sessions against column nodes (contacts, agents)
+  const colNodes = nodes.filter(n => n.type === 'contact' || n.type === 'agent');
+  for (let iter = 0; iter < 20; iter++) {
+    for (const sn of sessionNodes) {
+      if (topoSavedPositions[sn.id]) continue;
+      for (const cn of colNodes) {
+        let dx = sn.x - cn.x, dy = sn.y - cn.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = sn.r + cn.r + 6;
+        if (dist < minDist) {
+          if (dist < 1) { dx = 1; dy = 0; }
+          const push = (minDist - dist) / dist * 0.6;
+          sn.x += dx * push; sn.y += dy * push;
         }
       }
     }
@@ -218,12 +242,18 @@ export function computeTopologyLayout() {
     if (sessions.length === 0) {
       continue;
     } else {
-      const chain = [srcNode, ...sessions.map(s => nodeMap.get(`session:${s.id}`)).filter(Boolean), tgtNode];
-      for (let k = 0; k < chain.length - 1; k++) {
+      for (const s of sessions) {
+        const sn = nodeMap.get(`session:${s.id}`);
+        if (!sn) continue;
         layoutEdges.push({
-          source: chain[k], target: chain[k + 1],
+          source: srcNode, target: sn,
           type: 'contact-line', color: chColor, thickness: 1.2,
-          label: k === 0 ? ch : '', isActive: ce.isActive, data: ce,
+          label: ch, isActive: ce.isActive, data: ce,
+        });
+        layoutEdges.push({
+          source: sn, target: tgtNode,
+          type: 'contact-line', color: chColor, thickness: 1.2,
+          label: '', isActive: ce.isActive, data: ce,
         });
       }
     }
@@ -432,7 +462,10 @@ export function renderTopoCanvas() {
         ctx.save(); ctx.shadowColor = n.color; ctx.shadowBlur = 16;
       }
       ctx.globalAlpha = isDim ? 0.2 : 1;
-      const w = n.r * 2.4, h = n.r * 1.6, rx = 6;
+      ctx.font = '10px -apple-system, sans-serif';
+      const textW = ctx.measureText(n.label).width;
+      const w = Math.max(n.r * 2.4, textW + 20), h = n.r * 1.6, rx = 6;
+      n._boxW = w; n._boxH = h;
       ctx.beginPath();
       ctx.moveTo(n.x - w/2 + rx, n.y - h/2);
       ctx.lineTo(n.x + w/2 - rx, n.y - h/2);
@@ -448,11 +481,9 @@ export function renderTopoCanvas() {
       ctx.strokeStyle = isSelected ? '#fff' : isHl ? '#ddd' : isHovered ? '#aaa' : n.color;
       ctx.lineWidth = isSelected ? 2.5 : isHl ? 2.2 : isHovered ? 2 : 1.2; ctx.stroke();
       if (isHl && !isSelected) ctx.restore();
-      ctx.font = '10px -apple-system, sans-serif';
       ctx.fillStyle = isDim ? `rgba(${hexToRgb(n.textColor)}, 0.3)` : n.textColor;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      const gl = n.label.length > 10 ? n.label.slice(0, 9) + '..' : n.label;
-      ctx.fillText(gl, n.x, n.y);
+      ctx.fillText(n.label, n.x, n.y);
       ctx.font = '9px -apple-system, sans-serif';
       ctx.fillStyle = isDim ? 'rgba(136,136,136,0.3)' : '#888'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
       ctx.fillText(`${n.data.sessionCount}s`, n.x + w/2 + 6, n.y);
@@ -547,7 +578,7 @@ export function topoHitTest(mx, my) {
   for (let i = topoNodes.length - 1; i >= 0; i--) {
     const n = topoNodes[i];
     if (n.type === 'contact' && n.contactType === 'group') {
-      const w = n.r * 2.2, h = n.r * 1.6;
+      const w = n._boxW || n.r * 2.4, h = n._boxH || n.r * 1.6;
       if (x >= n.x - w/2 - 4 && x <= n.x + w/2 + 4 && y >= n.y - h/2 - 4 && y <= n.y + h/2 + 4) return n;
     } else {
       const dx = x - n.x, dy = y - n.y;
@@ -687,6 +718,24 @@ export function resetTopology() {
   for (const k of Object.keys(topoSavedPositions)) delete topoSavedPositions[k];
   _saveTopoPositions();
   if (topologyData) { computeTopologyLayout(); renderTopoCanvas(); }
+}
+
+export async function topoResetSession(agentId, sessionId) {
+  if (!confirm(`确定要重置此 Session 吗？\n\n${sessionId}\n\nJSONL 文件将被重命名备份，sessions.json 映射将被移除。\n该 Session 下次收到消息时会自动创建新会话。`)) return;
+  try {
+    const r = await fetch('/session-reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentId, sessionId }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(`重置失败：${j.error || r.statusText}`); return; }
+    topoHiddenSessions.add(sessionId);
+    _saveTopoHidden();
+    setTopoSelectedNode(null);
+    _sessionTimelineCache.delete(`${agentId}:${sessionId}`);
+    pollTopology();
+  } catch (e) { alert(`重置失败：${String(e && e.message || e)}`); }
 }
 
 export async function topoCloseSession(agentId, sessionId) {
@@ -925,7 +974,9 @@ function fmtTimelineDur(ms) {
 function fmtTimelineTs(ts) {
   try {
     const d = new Date(typeof ts === 'number' ? ts : Date.parse(ts));
-    return d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${mm}-${dd} ${d.toLocaleTimeString()}.${String(d.getMilliseconds()).padStart(3, '0')}`;
   } catch { return String(ts); }
 }
 
@@ -943,6 +994,12 @@ function renderTimelineEvent(e) {
   if (e.type === 'session') { rc.label = 'Session'; rc.labelColor = '#90a4ae'; rc.border = '#607d8b'; }
 
   let content = '';
+  if (e.type === 'thinking_level_change' && e.thinkingLevel) {
+    content = `<div style="font-size:11px;color:#ce93d8">thinking → <b>${escHtml(e.thinkingLevel)}</b></div>`;
+  }
+  if (e.type === 'session' && e.cwd) {
+    content = `<div style="font-size:11px;color:#90a4ae;font-family:monospace">${escHtml(e.cwd)}</div>`;
+  }
   if (e.textPreview) {
     const text = String(e.textPreview).trim();
     content = `<div style="font-size:12px;line-height:1.5;color:#dce3ea;white-space:pre-wrap;max-height:200px;overflow:auto">${escHtml(text.length > 600 ? text.slice(0, 600) + '…' : text)}</div>`;
@@ -955,6 +1012,9 @@ function renderTimelineEvent(e) {
   }
   if (e.errorMessage) {
     content += `<div style="font-size:11px;color:#ef5350;margin-top:2px">${escHtml(e.errorMessage)}</div>`;
+  }
+  if (!content && e.type && e.type !== 'message') {
+    content = `<div style="font-size:11px;color:#6c7883;font-style:italic">${escHtml(e.type)}${e.customType ? ` · ${escHtml(e.customType)}` : ''}</div>`;
   }
 
   let usageHtml = '';
@@ -1007,6 +1067,7 @@ function renderSessionFullDetail(panel) {
   if (d.agentId && d.id) {
     html += `<button class="btn-link" style="font-size:11px" onclick="window.open('/activity?agent=${encodeURIComponent(d.agentId)}&sid=${encodeURIComponent(d.id)}','_blank')">新窗口打开</button>`;
     html += `<button class="btn-danger" style="font-size:11px" onclick="topoCloseSession('${escHtml(d.agentId)}','${escHtml(d.id)}')">关闭 Session</button>`;
+    html += `<button class="btn-archive" style="font-size:11px;border-color:#b57d20;color:#f5c842" onclick="topoResetSession('${escHtml(d.agentId)}','${escHtml(d.id)}')">重置 Session</button>`;
   }
   html += `<button class="btn-archive" style="font-size:11px" onclick="hideSession('${escHtml(d.id || '')}')">隐藏</button>`;
   html += `</div>`;

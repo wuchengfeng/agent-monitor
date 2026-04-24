@@ -247,7 +247,7 @@ function parseLine(line, sessionId, agentId) {
 
     // 提取 textPreview
     const texts = contentArr.filter((c) => c && c.type === 'text').map((t) => t.text).join(' ');
-    const textPreview = texts;
+    const textPreview = texts || (typeof m.content === 'string' ? m.content : '');
 
     // 构造更详细的工具调用信息
     const toolCallDetails = toolCalls.map(tool => {
@@ -522,11 +522,9 @@ function classifySession(sessionKey, origin, dc) {
   // webchat with unknown sender
   if (keyParts[2] === 'webchat' && (!origin.from || origin.from === 'unknown')) return { type: 'system', subtype: 'webchat' };
   // group chat
-  if (dc.chatType === 'group' || (keyParts.length >= 4 && keyParts[keyParts.length - 2] === 'group')) {
-    // 从 key 中提取 group id
-    // 格式: agent:agentId:yach:group:groupId 或 agent:agentId:yach:group:xxx
+  const groupIdx = keyParts.indexOf('group');
+  if (dc.chatType === 'group' || (groupIdx >= 0 && groupIdx < keyParts.length - 1)) {
     let groupId = null;
-    const groupIdx = keyParts.indexOf('group');
     if (groupIdx >= 0 && groupIdx < keyParts.length - 1) {
       groupId = keyParts.slice(groupIdx + 1).join(':');
     }
@@ -1155,6 +1153,11 @@ const server = http.createServer(async (req, res) => {
     }
     const src = sessionActivePath(sessionId, agentId);
     const dst = path.join(getAgentSessionsDir(agentId), `${sessionId}.jsonl.deleted.${new Date().toISOString().replace(/[:.]/g, '-')}`);
+    if (!fs.existsSync(src)) {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ ok: true, sessionId, agentId, note: 'file already absent' }));
+      return;
+    }
     fs.rename(src, dst, (err) => {
       if (err) {
         res.statusCode = 500;
@@ -1167,6 +1170,43 @@ const server = http.createServer(async (req, res) => {
     });
     return;
   }
+  if (parsed.pathname === '/session-reset' && req.method === 'POST') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const sessionId = parsed.query && parsed.query.sid ? String(parsed.query.sid) : '';
+    const agentId = parsed.query && parsed.query.agent ? String(parsed.query.agent) : defaultAgentId;
+    if (!isValidSessionId(sessionId)) {
+      res.statusCode = 400;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'invalid sid' }));
+      return;
+    }
+    const dir = getAgentSessionsDir(agentId);
+    const src = path.join(dir, `${sessionId}.jsonl`);
+    const tag = new Date().toISOString().replace(/[:.]/g, '-');
+    const dst = path.join(dir, `${sessionId}.jsonl.reset.${tag}`);
+    const sessionsJsonPath = path.join(dir, 'sessions.json');
+    let removedKey = null;
+    try {
+      const raw = fs.readFileSync(sessionsJsonPath, 'utf8');
+      const meta = JSON.parse(raw);
+      for (const [key, val] of Object.entries(meta)) {
+        if (val && val.sessionId === sessionId) {
+          removedKey = key;
+          delete meta[key];
+          break;
+        }
+      }
+      if (removedKey) fs.writeFileSync(sessionsJsonPath, JSON.stringify(meta, null, 2));
+    } catch {}
+    if (fs.existsSync(src)) {
+      try { fs.renameSync(src, dst); } catch {}
+    }
+    topologyCache.builtAt = 0;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ ok: true, sessionId, agentId, removedKey, resetPath: dst }));
+    return;
+  }
+
   if (parsed.pathname === '/session-restore' && req.method === 'POST') {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const sessionId = parsed.query && parsed.query.sid ? String(parsed.query.sid) : '';
