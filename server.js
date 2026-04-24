@@ -494,7 +494,7 @@ try {
 } catch {}
 
 // --- Topology Cache ---
-let topologyCache = { agents: [], contacts: [], contactEdges: [], agentEdges: [], systemSummary: {}, version: 0, builtAt: 0 };
+let topologyCache = { agents: [], contacts: [], contactEdges: [], agentEdges: [], subagents: {}, systemSummary: {}, version: 0, builtAt: 0 };
 const TOPOLOGY_TTL_MS = 5000;
 
 function parseAgentFromKey(sessionKey) {
@@ -515,8 +515,8 @@ function classifySession(sessionKey, origin, dc) {
   const agentId = keyParts[1];
   // heartbeat: agent:xxx:main
   if (keyParts.length === 3 && keyParts[2] === 'main') return { type: 'system', subtype: 'heartbeat' };
-  // subagent
-  if (keyParts.length >= 4 && keyParts[2] === 'subagent') return { type: 'system', subtype: 'subagent' };
+  // subagent: agent:{agentId}:subagent:{uuid}
+  if (keyParts.length >= 4 && keyParts[2] === 'subagent') return { type: 'subagent', subagentId: keyParts.slice(3).join(':') };
   // openai API sessions: agent:xxx:openai:<uuid>
   if (keyParts[2] === 'openai' && (!dc.chatType || dc.chatType === 'unknown')) return { type: 'system', subtype: 'openai-api' };
   // webchat with unknown sender
@@ -554,7 +554,8 @@ function buildTopology() {
   const contactMap = new Map();  // contactId -> { id, label, type, channel, sessions[] }
   const contactEdgeMap = new Map(); // "contactId:agentId" -> { contactId, agentId, channel, chatType, sessionIds[], tokens, isActive }
   const agentEdgeDedup = new Map();
-  const systemCounts = { heartbeat: 0, 'openai-api': 0, webchat: 0, subagent: 0, unknown: 0 };
+  const systemCounts = { heartbeat: 0, 'openai-api': 0, webchat: 0, unknown: 0 };
+  const subagentSessions = new Map(); // agentId -> [{id, key, isActive, tokens, label, parentSessionId}]
 
   for (const agentId of agentIds) {
     const dir = getAgentSessionsDir(agentId);
@@ -587,6 +588,41 @@ function buildTopology() {
 
       if (classification.type === 'system') {
         systemCounts[classification.subtype] = (systemCounts[classification.subtype] || 0) + 1;
+        continue;
+      }
+
+      // Subagent — collect for separate display
+      if (classification.type === 'subagent') {
+        if (!subagentSessions.has(agentId)) subagentSessions.set(agentId, []);
+        let task = null;
+        const fp2 = path.join(dir, `${sessionId}.jsonl`);
+        try {
+          if (fs.existsSync(fp2)) {
+            const head = fs.readFileSync(fp2, 'utf8').slice(0, 8000);
+            const firstLines = head.split('\n').slice(0, 10);
+            for (const line of firstLines) {
+              if (!line) continue;
+              try {
+                const obj = JSON.parse(line);
+                const m = obj.message || {};
+                if (obj.type === 'session' && obj.task) task = String(obj.task).slice(0, 120);
+                if (m.role === 'user' && !task) {
+                  const texts = (Array.isArray(m.content) ? m.content : []).filter(c => c && c.type === 'text').map(c => c.text).join(' ');
+                  if (texts) {
+                    const taskMatch = texts.match(/\[Subagent Task\]:?\s*([\s\S]*)/i);
+                    task = (taskMatch ? taskMatch[1].trim() : texts).slice(0, 120);
+                  }
+                }
+              } catch {}
+            }
+          }
+        } catch {}
+        subagentSessions.get(agentId).push({
+          id: sessionId, key: sessionKey, isActive, lastActiveTs,
+          tokens: { input: tokens.input, output: tokens.output },
+          label: task || origin.label || sessionId.slice(0, 8),
+          parentSessionId: null, // resolved below via spawn scan
+        });
         continue;
       }
 
@@ -681,6 +717,15 @@ function buildTopology() {
               type: 'spawn', sourceAgent: agentId, targetAgent: childAgent || agentId,
               meta: { status: ev.spawnResult.status, ts: ev.ts },
             });
+            // Map childSessionKey → parent sessionId for subagent display
+            const childMeta = sessionsJson[ev.spawnResult.childSessionKey];
+            if (childMeta && childMeta.sessionId) {
+              const subs = subagentSessions.get(agentId);
+              if (subs) {
+                const sub = subs.find(s => s.id === childMeta.sessionId);
+                if (sub) sub.parentSessionId = sid;
+              }
+            }
           }
           if (ev.provenance && ev.provenance.sourceSessionKey) {
             const srcAgent = parseAgentFromKey(ev.provenance.sourceSessionKey);
@@ -695,11 +740,16 @@ function buildTopology() {
     }
   }
 
+  // Convert subagentSessions map to plain object
+  const subagents = {};
+  for (const [aid, subs] of subagentSessions) subagents[aid] = subs;
+
   topologyCache = {
     agents,
     contacts: [...contactMap.values()],
     contactEdges: [...contactEdgeMap.values()],
     agentEdges: [...agentEdgeDedup.values()],
+    subagents,
     systemSummary: systemCounts,
     version: topologyCache.version + 1,
     builtAt: now,
@@ -1151,11 +1201,24 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'invalid sid' }));
       return;
     }
+    const dir = getAgentSessionsDir(agentId);
+    // Remove from sessions.json so framework creates a fresh session on next message
+    let removedKey = null;
+    try {
+      const sjPath = path.join(dir, 'sessions.json');
+      const raw = fs.readFileSync(sjPath, 'utf8');
+      const meta = JSON.parse(raw);
+      for (const [key, val] of Object.entries(meta)) {
+        if (val && val.sessionId === sessionId) { removedKey = key; delete meta[key]; break; }
+      }
+      if (removedKey) fs.writeFileSync(sjPath, JSON.stringify(meta, null, 2));
+    } catch {}
     const src = sessionActivePath(sessionId, agentId);
-    const dst = path.join(getAgentSessionsDir(agentId), `${sessionId}.jsonl.deleted.${new Date().toISOString().replace(/[:.]/g, '-')}`);
+    const dst = path.join(dir, `${sessionId}.jsonl.deleted.${new Date().toISOString().replace(/[:.]/g, '-')}`);
     if (!fs.existsSync(src)) {
+      topologyCache.builtAt = 0;
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ ok: true, sessionId, agentId, note: 'file already absent' }));
+      res.end(JSON.stringify({ ok: true, sessionId, agentId, removedKey, note: 'file already absent' }));
       return;
     }
     fs.rename(src, dst, (err) => {
@@ -1165,8 +1228,9 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: String(err && err.message || err) }));
         return;
       }
+      topologyCache.builtAt = 0;
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ ok: true, sessionId, agentId, deletedPath: dst }));
+      res.end(JSON.stringify({ ok: true, sessionId, agentId, removedKey, deletedPath: dst }));
     });
     return;
   }

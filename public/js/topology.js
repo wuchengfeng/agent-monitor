@@ -38,7 +38,7 @@ export async function pollTopology() {
 
 export function computeTopologyLayout() {
   if (!topologyData) return;
-  const { agents, contacts, contactEdges, agentEdges, systemSummary } = topologyData;
+  const { agents, contacts, contactEdges, agentEdges, subagents, systemSummary } = topologyData;
   const canvas = document.getElementById('topo-canvas');
   if (!canvas) return;
   const W = canvas.width / (window.devicePixelRatio || 1);
@@ -120,6 +120,21 @@ export function computeTopologyLayout() {
     nodeMap.set(sysNode.id, sysNode);
   }
 
+  // Subagent nodes — placed near their parent session (or parent agent as fallback)
+  const subagentList = [];
+  // Defer placement until after session nodes exist — collect first
+  const pendingSubagents = [];
+  if (subagents) {
+    for (const [aid, subs] of Object.entries(subagents)) {
+      const parentAgent = nodeMap.get(`agent:${aid}`);
+      if (!parentAgent) continue;
+      const visibleSubs = subs.filter(s => !topoHiddenSessions.has(s.id));
+      for (const sub of visibleSubs) {
+        pendingSubagents.push({ sub, aid, parentAgent });
+      }
+    }
+  }
+
   // Vertical overlap prevention within columns
   const columns = { person: [], group: [], agent: [] };
   for (const n of nodes) { if (columns[n.column]) columns[n.column].push(n); }
@@ -186,14 +201,37 @@ export function computeTopologyLayout() {
     });
   }
 
+  // Place subagent nodes now that session nodes exist
+  pendingSubagents.forEach((p, idx) => {
+    const { sub, aid, parentAgent } = p;
+    const parentSession = sub.parentSessionId ? nodeMap.get(`session:${sub.parentSessionId}`) : null;
+    const anchor = parentSession || parentAgent;
+    const offsetX = parentSession ? 60 : 80;
+    const offsetY = (idx - (pendingSubagents.length - 1) / 2) * 36;
+    const tok = sub.tokens ? (sub.tokens.input || 0) + (sub.tokens.output || 0) : 0;
+    const r = 8 + Math.min(Math.sqrt(tok / 1000) * 4, 10);
+    const sNode = {
+      id: `subagent:${sub.id}`, type: 'subagent',
+      x: anchor.x + offsetX, y: anchor.y + offsetY,
+      r, color: '#9c27b0', stroke: sub.isActive ? '#ce93d8' : '#6a1b9a', textColor: '#e1bee7',
+      label: topoDisplayName(`subagent:${sub.id}`, sub.label || sub.id.slice(0, 8)),
+      data: { ...sub, agentId: aid }, parentAgentId: `agent:${aid}`,
+      parentSessionNodeId: parentSession ? parentSession.id : null,
+      column: 'subagent',
+    };
+    nodes.push(sNode);
+    nodeMap.set(sNode.id, sNode);
+    subagentList.push(sNode);
+  });
+
   // Restore saved positions
   for (const n of nodes) {
     const saved = topoSavedPositions[n.id];
     if (saved) { n.x = saved.x; n.y = saved.y; }
   }
 
-  // Session overlap prevention
-  const sessionNodes = nodes.filter(n => n.type === 'session');
+  // Session + subagent overlap prevention
+  const sessionNodes = nodes.filter(n => n.type === 'session' || n.type === 'subagent');
   for (let iter = 0; iter < 50; iter++) {
     for (let i = 0; i < sessionNodes.length; i++) {
       if (topoSavedPositions[sessionNodes[i].id]) continue;
@@ -276,6 +314,18 @@ export function computeTopologyLayout() {
     });
   }
 
+  // Subagent edges: parent session → subagent (or agent → subagent as fallback)
+  for (const sn of subagentList) {
+    const parentSession = sn.parentSessionNodeId ? nodeMap.get(sn.parentSessionNodeId) : null;
+    const parentNode = parentSession || nodeMap.get(sn.parentAgentId);
+    if (!parentNode) continue;
+    layoutEdges.push({
+      source: parentNode, target: sn,
+      type: 'subagent', color: '#9c27b0', thickness: 1.5,
+      label: 'spawn', isActive: sn.data && sn.data.isActive, dashed: true, data: sn.data,
+    });
+  }
+
   setTopoNodes(nodes);
   setTopoEdges(layoutEdges);
 }
@@ -304,6 +354,10 @@ export function renderTopoCanvas() {
         hlNodes.add(sn.id);
         if (sn.contactNodeId) hlNodes.add(sn.contactNodeId);
         if (sn.agentNodeId) hlNodes.add(sn.agentNodeId);
+        // Also highlight subagents spawned from this session
+        for (const n of topoNodes) {
+          if (n.type === 'subagent' && n.parentSessionNodeId === sn.id) hlNodes.add(n.id);
+        }
       }
     } else if (sel.type === 'contact') {
       hlNodes.add(sel.id);
@@ -320,6 +374,14 @@ export function renderTopoCanvas() {
           hlNodes.add(n.id);
           if (n.contactNodeId) hlNodes.add(n.contactNodeId);
         }
+        if (n.type === 'subagent' && n.parentAgentId === sel.id) hlNodes.add(n.id);
+      }
+    } else if (sel.type === 'subagent') {
+      hlNodes.add(sel.id);
+      const sn = topoNodes.find(n => n.id === topoSelectedNode.id);
+      if (sn) {
+        if (sn.parentAgentId) hlNodes.add(sn.parentAgentId);
+        if (sn.parentSessionNodeId) hlNodes.add(sn.parentSessionNodeId);
       }
     }
     for (const e of topoEdges) {
@@ -453,6 +515,33 @@ export function renderTopoCanvas() {
       ctx.fillText('SYS', n.x, n.y);
       ctx.fillStyle = '#666'; ctx.textBaseline = 'top';
       ctx.fillText(n.label, n.x, n.y + n.r + 4);
+      ctx.globalAlpha = 1;
+      continue;
+    }
+
+    if (n.type === 'subagent') {
+      if (isHl && !isSelected) {
+        ctx.save(); ctx.shadowColor = '#9c27b0'; ctx.shadowBlur = 14;
+      }
+      ctx.globalAlpha = isDim ? 0.2 : 1;
+      // Hexagon shape for subagent
+      const sides = 6, r = n.r;
+      ctx.beginPath();
+      for (let s = 0; s < sides; s++) {
+        const angle = (Math.PI / 3) * s - Math.PI / 2;
+        const px = n.x + r * Math.cos(angle), py = n.y + r * Math.sin(angle);
+        s === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = isHl ? 'rgba(156,39,176,0.35)' : 'rgba(156,39,176,0.18)'; ctx.fill();
+      ctx.strokeStyle = isSelected ? '#fff' : isHl ? '#e1bee7' : isHovered ? '#ce93d8' : n.stroke;
+      ctx.lineWidth = isSelected ? 2 : 1.2; ctx.stroke();
+      if (isHl && !isSelected) ctx.restore();
+      ctx.font = '8px -apple-system, sans-serif';
+      ctx.fillStyle = isDim ? 'rgba(225,190,231,0.3)' : n.textColor;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      const sl = n.label.length > 14 ? n.label.slice(0, 13) + '..' : n.label;
+      ctx.fillText(sl, n.x, n.y + n.r + 3);
       ctx.globalAlpha = 1;
       continue;
     }
@@ -826,6 +915,11 @@ export function renderTopoSidePanel() {
     renderSessionFullDetail(panel);
     return;
   }
+  // Subagent nodes — show compact detail
+  if (topoSelectedNode.type === 'subagent') {
+    renderSubagentDetail(panel);
+    return;
+  }
   if (topoSidePanelTab === 'agent') {
     renderTopoAgentPanel(panel);
   } else if (topoSidePanelTab === 'contact') {
@@ -1034,6 +1128,65 @@ function renderTimelineEvent(e) {
     </div>
     ${content}
   </div>`;
+}
+
+function renderSubagentDetail(panel) {
+  if (!topoSelectedNode || topoSelectedNode.type !== 'subagent') {
+    panel.innerHTML = '<div class="mono" style="padding:20px;color:#7aa2d5">点击 Subagent 查看详情</div>'; return;
+  }
+  const sn = topoNodes.find(n => n.id === topoSelectedNode.id);
+  if (!sn || !sn.data) { panel.innerHTML = '<div class="mono" style="padding:20px">未找到 Subagent</div>'; return; }
+  const d = sn.data;
+  const totalTok = d.tokens ? (d.tokens.input || 0) + (d.tokens.output || 0) : 0;
+  const parentAgent = topologyData.agents.find(a => a.id === d.agentId);
+
+  let html = `<div style="padding:8px 12px">
+    <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:6px">
+      <span class="badge" style="border-color:#9c27b0;color:#ce93d8">Subagent</span>
+      <span class="badge" style="border-color:${d.isActive ? '#35c46a' : '#555'};color:${d.isActive ? '#a5d6a7' : '#888'}">${d.isActive ? 'active' : 'ended'}</span>
+      ${parentAgent ? `<span class="${agentTagClass(d.agentId)}">${escHtml(d.agentId)}</span>` : ''}
+      <span class="badge">${formatCompactTokens(totalTok)}</span>
+    </div>
+    <div class="mono" style="font-size:10px;color:#546e7a;margin-bottom:4px">${escHtml(d.id)}</div>
+    ${d.label ? `<div style="font-size:12px;color:#cfe3ff;margin-bottom:8px;line-height:1.4">${escHtml(d.label)}</div>` : ''}
+  </div>`;
+
+  // Action buttons
+  html += `<div class="topo-section" style="display:flex;gap:6px;flex-wrap:wrap;padding:4px 12px">`;
+  if (d.agentId && d.id) {
+    html += `<button class="btn-link" style="font-size:11px" onclick="window.open('/activity?agent=${encodeURIComponent(d.agentId)}&sid=${encodeURIComponent(d.id)}','_blank')">新窗口打开</button>`;
+    html += `<button class="btn-danger" style="font-size:11px" onclick="topoCloseSession('${escHtml(d.agentId)}','${escHtml(d.id)}')">关闭</button>`;
+  }
+  html += `<button class="btn-archive" style="font-size:11px" onclick="hideSession('${escHtml(d.id || '')}')">隐藏</button>`;
+  html += `</div>`;
+
+  // Timeline
+  html += `<div id="topo-session-timeline" style="margin-top:4px;padding:0 12px"><div class="mono" style="padding:12px;color:#7aa2d5;font-size:11px">加载时间轴…</div></div>`;
+  panel.innerHTML = html;
+
+  if (d.agentId && d.id) {
+    const cacheKey = `${d.agentId}:${d.id}`;
+    const cached = _sessionTimelineCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < 30000) {
+      _renderTimelineInto(cached.items);
+    } else {
+      fetch(`/api/session-history?agent=${encodeURIComponent(d.agentId)}&sid=${encodeURIComponent(d.id)}&limit=200`, { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .then(j => {
+          if (!j || !Array.isArray(j.items)) {
+            const el = document.getElementById('topo-session-timeline');
+            if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#ef5350;font-size:11px">无法加载时间轴数据</div>';
+            return;
+          }
+          _sessionTimelineCache.set(cacheKey, { items: j.items, ts: Date.now() });
+          _renderTimelineInto(j.items);
+        })
+        .catch(() => {
+          const el = document.getElementById('topo-session-timeline');
+          if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#ef5350;font-size:11px">加载失败</div>';
+        });
+    }
+  }
 }
 
 function renderSessionFullDetail(panel) {
