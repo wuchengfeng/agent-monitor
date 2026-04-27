@@ -5,6 +5,7 @@ import {
   topoDragging, setTopoDragging, topoPanStart, setTopoPanStart,
   topoAnimFrame, setTopoAnimFrame, topoPollingInterval, setTopoPollingInterval,
   topoEdgeDebounce, setTopoEdgeDebounce, topologyViewActive, setTopologyViewActive,
+  topoTimeFilter, setTopoTimeFilter,
   topoSavedPositions, _saveTopoPositions, topoCustomNames, _saveTopoNames,
   topoHiddenSessions, _saveTopoHidden, topoDisplayName,
   showArchived, archived, channelViewActive, setChannelViewActive,
@@ -26,6 +27,27 @@ const CHANNEL_COLORS = {
 };
 export function sessionNodeColor(ch) { return CHANNEL_COLORS[ch] || CHANNEL_COLORS._default; }
 
+function topoTimeCutoff() {
+  const now = Date.now();
+  const d = new Date();
+  switch (topoTimeFilter) {
+    case 'today': { d.setHours(0, 0, 0, 0); return d.getTime(); }
+    case '3d': return now - 3 * 86400000;
+    case '7d': return now - 7 * 86400000;
+    case '30d': return now - 30 * 86400000;
+    default: return 0;
+  }
+}
+
+export function changeTopoTimeFilter(v) {
+  setTopoTimeFilter(v);
+  document.querySelectorAll('.topo-time-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === v);
+  });
+  computeTopologyLayout();
+  renderTopoCanvas();
+}
+
 export async function pollTopology() {
   try {
     const r = await fetch('/api/topology', { cache: 'no-store' });
@@ -46,10 +68,14 @@ export function computeTopologyLayout() {
   const nodes = [];
   const nodeMap = new Map();
 
+  // Time filter cutoff
+  const cutoff = topoTimeCutoff();
+  const sessionVisible = (s) => !topoHiddenSessions.has(s.id) && (!cutoff || (s.lastActiveTs && s.lastActiveTs >= cutoff));
+
   // Pre-compute which contacts have at least one visible session
   const contactVisibleCount = new Map();
   for (const ce of contactEdges) {
-    const visible = (ce.sessions || []).filter(s => !topoHiddenSessions.has(s.id)).length;
+    const visible = (ce.sessions || []).filter(sessionVisible).length;
     contactVisibleCount.set(ce.contactId, (contactVisibleCount.get(ce.contactId) || 0) + visible);
   }
 
@@ -128,7 +154,7 @@ export function computeTopologyLayout() {
     for (const [aid, subs] of Object.entries(subagents)) {
       const parentAgent = nodeMap.get(`agent:${aid}`);
       if (!parentAgent) continue;
-      const visibleSubs = subs.filter(s => !topoHiddenSessions.has(s.id));
+      const visibleSubs = subs.filter(sessionVisible);
       for (const sub of visibleSubs) {
         pendingSubagents.push({ sub, aid, parentAgent });
       }
@@ -159,7 +185,7 @@ export function computeTopologyLayout() {
   const allSessionTokens = [];
   for (const ce of contactEdges) {
     for (const s of (ce.sessions || [])) {
-      if (topoHiddenSessions.has(s.id)) continue;
+      if (!sessionVisible(s)) continue;
       const tok = s.tokens ? (s.tokens.input || 0) + (s.tokens.output || 0) : 0;
       allSessionTokens.push(tok);
     }
@@ -170,7 +196,7 @@ export function computeTopologyLayout() {
     const srcNode = nodeMap.get(ce.contactId);
     const tgtNode = nodeMap.get(`agent:${ce.agentId}`);
     if (!srcNode || !tgtNode) continue;
-    const sessions = (ce.sessions || []).filter(s => !topoHiddenSessions.has(s.id));
+    const sessions = (ce.sessions || []).filter(sessionVisible);
     const count = sessions.length;
     const edgeDx = tgtNode.x - srcNode.x;
     const edgeDy = tgtNode.y - srcNode.y;
@@ -274,7 +300,7 @@ export function computeTopologyLayout() {
     const srcNode = nodeMap.get(ce.contactId);
     const tgtNode = nodeMap.get(`agent:${ce.agentId}`);
     if (!srcNode || !tgtNode) continue;
-    const sessions = (ce.sessions || []).filter(s => !topoHiddenSessions.has(s.id));
+    const sessions = (ce.sessions || []).filter(sessionVisible);
     const ch = ce.channel || 'yach';
     const chColor = CHANNEL_COLORS[ch] || '#455a64';
     if (sessions.length === 0) {
@@ -874,6 +900,13 @@ export function renderTopologyView() {
             <button onclick="topoZoomIn()" title="放大">+</button>
             <button onclick="topoZoomOut()" title="缩小">-</button>
             <button onclick="resetTopology()" title="重置">R</button>
+          </div>
+          <div class="topo-time-filter">
+            <button class="topo-time-btn ${topoTimeFilter==='today'?'active':''}" data-filter="today" onclick="changeTopoTimeFilter('today')">今天</button>
+            <button class="topo-time-btn ${topoTimeFilter==='3d'?'active':''}" data-filter="3d" onclick="changeTopoTimeFilter('3d')">3天</button>
+            <button class="topo-time-btn ${topoTimeFilter==='7d'?'active':''}" data-filter="7d" onclick="changeTopoTimeFilter('7d')">7天</button>
+            <button class="topo-time-btn ${topoTimeFilter==='30d'?'active':''}" data-filter="30d" onclick="changeTopoTimeFilter('30d')">30天</button>
+            <button class="topo-time-btn ${topoTimeFilter==='all'?'active':''}" data-filter="all" onclick="changeTopoTimeFilter('all')">全部</button>
           </div>
           <div class="topo-legend">
             <div class="topo-legend-row"><div class="topo-legend-circle" style="background:rgba(58,120,255,.2);border:1px solid #3a78ff;width:14px;height:14px"></div> 人物</div>

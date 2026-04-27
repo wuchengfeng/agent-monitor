@@ -103,6 +103,10 @@ h1{font-size:18px;margin:0}
 .topo-controls{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;gap:4px;z-index:2}
 .topo-controls button{width:30px;height:30px;border:1px solid #2a3e52;border-radius:6px;background:#0e1621;color:#e6eef8;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center}
 .topo-controls button:hover{background:#1c2834}
+.topo-time-filter{position:absolute;top:10px;left:50%;transform:translateX(-50%);display:flex;gap:2px;z-index:2;background:rgba(14,22,33,.92);border:1px solid #1c2834;border-radius:8px;padding:3px}
+.topo-time-btn{padding:4px 10px;border:none;border-radius:6px;background:transparent;color:#7aa2d5;font-size:12px;cursor:pointer;font-family:inherit;transition:all .15s}
+.topo-time-btn:hover{background:rgba(58,120,255,.15);color:#a9c7ff}
+.topo-time-btn.active{background:rgba(58,120,255,.25);color:#e6eef8;font-weight:600}
 .topo-legend{position:absolute;bottom:10px;left:10px;background:rgba(14,22,33,.92);border:1px solid #1c2834;border-radius:8px;padding:8px 12px;font-size:11px;color:#a8b3bf;z-index:2;display:flex;flex-direction:column;gap:4px}
 .topo-legend-row{display:flex;align-items:center;gap:8px}
 .topo-legend-line{width:24px;height:2px;border-radius:1px}

@@ -14,6 +14,7 @@ import {
   renderTopoSidePanel, resetTopology, topoZoomIn, topoZoomOut,
   hideSession, restoreHiddenSession, restoreAllHiddenSessions,
   topoSelectAgent, topoSelectContact, _topoRefreshTimeline, topoCloseSession, topoResetSession,
+  changeTopoTimeFilter,
 } from './topology.js';
 import { toggleChannelView, pollChannels, loadNicknames, saveNickname, startEditNickname, cancelEditNickname } from './channels.js';
 
@@ -34,6 +35,7 @@ Object.assign(window, {
   pollTopology, computeTopologyLayout, renderTopoCanvas,
   hideSession, restoreHiddenSession, restoreAllHiddenSessions,
   topoSelectAgent, topoSelectContact, setTopoSidePanelTab, _topoRefreshTimeline, topoCloseSession, topoResetSession,
+  changeTopoTimeFilter,
   // Channels
   toggleChannelView, saveNickname, startEditNickname, cancelEditNickname,
   // Render

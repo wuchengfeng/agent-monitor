@@ -64,6 +64,8 @@ export let topoPollingInterval = null;
 export function setTopoPollingInterval(v) { topoPollingInterval = v; }
 export let topoEdgeDebounce = null;
 export function setTopoEdgeDebounce(v) { topoEdgeDebounce = v; }
+export let topoTimeFilter = 'today';
+export function setTopoTimeFilter(v) { topoTimeFilter = v; }
 
 // --- Topology persistence (localStorage) ---
 export const topoSavedPositions = JSON.parse(localStorage.getItem('topo_node_positions') || '{}');
