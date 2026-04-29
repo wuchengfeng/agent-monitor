@@ -494,7 +494,7 @@ try {
 } catch {}
 
 // --- Topology Cache ---
-let topologyCache = { agents: [], contacts: [], contactEdges: [], agentEdges: [], subagents: {}, systemSummary: {}, version: 0, builtAt: 0 };
+let topologyCache = { agents: [], contacts: [], contactEdges: [], agentEdges: [], agentEdgeSessions: [], subagents: {}, systemSummary: {}, version: 0, builtAt: 0 };
 const TOPOLOGY_TTL_MS = 5000;
 
 function parseAgentFromKey(sessionKey) {
@@ -554,6 +554,8 @@ function buildTopology() {
   const contactMap = new Map();  // contactId -> { id, label, type, channel, sessions[] }
   const contactEdgeMap = new Map(); // "contactId:agentId" -> { contactId, agentId, channel, chatType, sessionIds[], tokens, isActive }
   const agentEdgeDedup = new Map();
+  const agentEdgeInteractions = []; // [{sourceAgent, targetAgent, edgeType, sourceSessionId, targetSessionKey, messagePreview, ts, status}]
+  const _targetSessionsCache = new Map(); // agentId -> sessions.json object (cached for perf)
   const systemCounts = { heartbeat: 0, 'openai-api': 0, webchat: 0, unknown: 0 };
   const subagentSessions = new Map(); // agentId -> [{id, key, isActive, tokens, label, parentSessionId}]
 
@@ -687,6 +689,8 @@ function buildTopology() {
     });
 
     // Scan active JSONL files for inter-agent edges (sessions_send/sessions_spawn)
+    // pendingSends tracks send calls before their result arrives in the same session
+    const pendingSends = new Map(); // `${sid}:${targetAgent}` -> interaction object
     for (const sid of activeSessions) {
       const fp = path.join(dir, `${sid}.jsonl`);
       try {
@@ -704,12 +708,45 @@ function buildTopology() {
               type: 'send', sourceAgent: agentId, targetAgent,
               meta: { messagePreview: ev.sendTarget.messagePreview, ts: ev.ts },
             });
+            // Collect interaction with session IDs
+            const interaction = {
+              sourceAgent: agentId, targetAgent,
+              edgeType: 'send',
+              sourceSessionId: sid,
+              targetSessionKey: ev.sendTarget.sessionKey,
+              targetSessionId: null,
+              messagePreview: ev.sendTarget.messagePreview,
+              ts: ev.ts, status: null,
+            };
+            // Resolve target session ID from the target agent's sessions.json (cached)
+            if (!_targetSessionsCache.has(targetAgent)) {
+              _targetSessionsCache.set(targetAgent, readJson(path.join(getAgentSessionsDir(targetAgent), 'sessions.json')) || {});
+            }
+            const targetMeta = _targetSessionsCache.get(targetAgent)[ev.sendTarget.sessionKey];
+            if (targetMeta && targetMeta.sessionId) {
+              interaction.targetSessionId = targetMeta.sessionId;
+            }
+            agentEdgeInteractions.push(interaction);
+            pendingSends.set(`${sid}:${targetAgent}`, interaction);
           }
           if (ev.sendResult && ev.sendResult.sessionKey) {
             const targetAgent = parseAgentFromKey(ev.sendResult.sessionKey);
             const rKey = `send:${agentId}:${targetAgent}`;
             const existing = agentEdgeDedup.get(rKey);
             if (existing) existing.meta.status = ev.sendResult.status;
+            // Update pending interaction with status
+            const pending = pendingSends.get(`${sid}:${targetAgent}`);
+            if (pending) {
+              pending.status = ev.sendResult.status;
+              // Also resolve target session ID from result if not yet resolved
+              if (!pending.targetSessionId) {
+                if (!_targetSessionsCache.has(targetAgent)) {
+                  _targetSessionsCache.set(targetAgent, readJson(path.join(getAgentSessionsDir(targetAgent), 'sessions.json')) || {});
+                }
+                const targetMeta2 = _targetSessionsCache.get(targetAgent)[ev.sendResult.sessionKey];
+                if (targetMeta2 && targetMeta2.sessionId) pending.targetSessionId = targetMeta2.sessionId;
+              }
+            }
           }
           if (ev.spawnResult && ev.spawnResult.childSessionKey) {
             const childAgent = parseAgentFromKey(ev.spawnResult.childSessionKey);
@@ -744,11 +781,43 @@ function buildTopology() {
   const subagents = {};
   for (const [aid, subs] of subagentSessions) subagents[aid] = subs;
 
+  // Build agentEdgeSessions from collected interactions
+  const agentEdgeSessions = agentEdgeInteractions.map((inter, idx) => {
+    let tokens = { input: 0, output: 0 };
+    let isActive = false;
+    let lastActiveTs = null;
+    // Get token stats from source session
+    const srcDir = getAgentSessionsDir(inter.sourceAgent);
+    const srcFp = path.join(srcDir, `${inter.sourceSessionId}.jsonl`);
+    const srcCached = statsCache.get(srcFp);
+    if (srcCached) { tokens = { input: srcCached.input, output: srcCached.output }; }
+    try {
+      isActive = fs.existsSync(srcFp);
+      if (isActive) { lastActiveTs = fs.statSync(srcFp).mtimeMs; }
+    } catch {}
+    return {
+      id: `ae-${inter.sourceAgent}-${inter.targetAgent}-${idx}`,
+      sourceAgent: inter.sourceAgent,
+      targetAgent: inter.targetAgent,
+      edgeType: inter.edgeType,
+      sourceSessionId: inter.sourceSessionId,
+      targetSessionId: inter.targetSessionId,
+      targetSessionKey: inter.targetSessionKey,
+      messagePreview: inter.messagePreview,
+      ts: inter.ts,
+      status: inter.status,
+      tokens,
+      isActive,
+      lastActiveTs,
+    };
+  });
+
   topologyCache = {
     agents,
     contacts: [...contactMap.values()],
     contactEdges: [...contactEdgeMap.values()],
     agentEdges: [...agentEdgeDedup.values()],
+    agentEdgeSessions,
     subagents,
     systemSummary: systemCounts,
     version: topologyCache.version + 1,

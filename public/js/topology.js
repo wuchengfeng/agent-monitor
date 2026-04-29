@@ -60,7 +60,7 @@ export async function pollTopology() {
 
 export function computeTopologyLayout() {
   if (!topologyData) return;
-  const { agents, contacts, contactEdges, agentEdges, subagents, systemSummary } = topologyData;
+  const { agents, contacts, contactEdges, agentEdges, agentEdgeSessions, subagents, systemSummary } = topologyData;
   const canvas = document.getElementById('topo-canvas');
   if (!canvas) return;
   const W = canvas.width / (window.devicePixelRatio || 1);
@@ -323,11 +323,19 @@ export function computeTopologyLayout() {
     }
   }
 
-  // Agent↔Agent edges
+  // Agent↔Agent edges (skip pairs that have agentEdgeSessions — those get session nodes instead)
+  const agentSessionPairs = new Set();
+  if (agentEdgeSessions) {
+    for (const aes of agentEdgeSessions) {
+      agentSessionPairs.add(`${aes.sourceAgent}:${aes.targetAgent}`);
+    }
+  }
   for (const ae of agentEdges) {
     const srcNode = nodeMap.get(`agent:${ae.sourceAgent}`);
     const tgtNode = nodeMap.get(`agent:${ae.targetAgent}`);
     if (!srcNode || !tgtNode || srcNode === tgtNode) continue;
+    // Skip 'send' edges that have explicit session nodes
+    if (ae.type === 'send' && agentSessionPairs.has(`${ae.sourceAgent}:${ae.targetAgent}`)) continue;
     let color = '#3a78ff';
     if (ae.type === 'spawn' || ae.type === 'spawn-result') color = '#9c27b0';
     if (ae.meta && ae.meta.status === 'error') color = '#f44336';
@@ -338,6 +346,61 @@ export function computeTopologyLayout() {
       label: ae.type === 'spawn' ? 'spawn' : ae.type === 'send' ? 'send' : ae.type === 'send-incoming' ? 'recv' : ae.type,
       isActive: false, dashed: true, data: ae,
     });
+  }
+
+  // Agent-edge session nodes (inter-agent communication sessions)
+  if (agentEdgeSessions && agentEdgeSessions.length) {
+    // Group by sourceAgent:targetAgent pair for offset calculation
+    const pairGroups = new Map();
+    for (const aes of agentEdgeSessions) {
+      const pairKey = `${aes.sourceAgent}:${aes.targetAgent}`;
+      if (!pairGroups.has(pairKey)) pairGroups.set(pairKey, []);
+      pairGroups.get(pairKey).push(aes);
+    }
+    for (const [pairKey, sessions] of pairGroups) {
+      const [srcAgentId, tgtAgentId] = pairKey.split(':');
+      const srcNode = nodeMap.get(`agent:${srcAgentId}`);
+      const tgtNode = nodeMap.get(`agent:${tgtAgentId}`);
+      if (!srcNode || !tgtNode || srcNode === tgtNode) continue;
+      const edgeDx = tgtNode.x - srcNode.x;
+      const edgeDy = tgtNode.y - srcNode.y;
+      const edgeLen = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy) || 1;
+      const perpX = -edgeDy / edgeLen;
+      const perpY = edgeDx / edgeLen;
+      const count = sessions.length;
+      sessions.forEach((aes, i) => {
+        const t = 0.5;
+        const perpOffset = count > 1 ? (i - (count - 1) / 2) * 28 : 0;
+        const x = srcNode.x + edgeDx * t + perpX * perpOffset;
+        const y = srcNode.y + edgeDy * t + perpY * perpOffset;
+        const color = aes.edgeType === 'spawn' ? '#9c27b0' : '#3a78ff';
+        const tok = aes.tokens ? (aes.tokens.input || 0) + (aes.tokens.output || 0) : 0;
+        const r = 10 + Math.min(Math.sqrt(tok / 1000) * 3, 8);
+        const sNode = {
+          id: `agent-session:${aes.id}`, type: 'agent-session',
+          x, y, r,
+          color, stroke: aes.isActive ? color : '#444', textColor: '#a8b3bf',
+          label: topoDisplayName(`agent-session:${aes.id}`, aes.messagePreview ? aes.messagePreview.slice(0, 20) : `${srcAgentId}→${tgtAgentId}`),
+          data: aes,
+          sourceAgentNodeId: `agent:${srcAgentId}`,
+          targetAgentNodeId: `agent:${tgtAgentId}`,
+          column: 'agent-session',
+        };
+        nodes.push(sNode);
+        nodeMap.set(sNode.id, sNode);
+        // Edges: source agent → session node → target agent
+        layoutEdges.push({
+          source: srcNode, target: sNode,
+          type: 'agent-session-line', color, thickness: 1.5,
+          label: '', isActive: aes.isActive, dashed: true, data: aes,
+        });
+        layoutEdges.push({
+          source: sNode, target: tgtNode,
+          type: 'agent-session-line', color, thickness: 1.5,
+          label: aes.edgeType || 'send', isActive: aes.isActive, dashed: true, data: aes,
+        });
+      });
+    }
   }
 
   // Subagent edges: parent session → subagent (or agent → subagent as fallback)
@@ -409,6 +472,13 @@ export function renderTopoCanvas() {
         if (sn.parentAgentId) hlNodes.add(sn.parentAgentId);
         if (sn.parentSessionNodeId) hlNodes.add(sn.parentSessionNodeId);
       }
+    } else if (sel.type === 'agent-session') {
+      hlNodes.add(sel.id);
+      const sn = topoNodes.find(n => n.id === sel.id);
+      if (sn) {
+        if (sn.sourceAgentNodeId) hlNodes.add(sn.sourceAgentNodeId);
+        if (sn.targetAgentNodeId) hlNodes.add(sn.targetAgentNodeId);
+      }
     }
     for (const e of topoEdges) {
       if (hlNodes.has(e.source.id) && hlNodes.has(e.target.id)) hlEdges.add(e);
@@ -446,9 +516,38 @@ export function renderTopoCanvas() {
     }
   }
 
+  // Agent-session-line edges (straight, dashed)
+  for (const e of topoEdges) {
+    if (e.type !== 'agent-session-line') continue;
+    const sx = e.source.x, sy = e.source.y;
+    const tx = e.target.x, ty = e.target.y;
+    const isHl = hlEdges.has(e);
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty);
+    if (isHl) {
+      ctx.save();
+      ctx.shadowColor = e.color; ctx.shadowBlur = 10;
+      ctx.strokeStyle = e.color; ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+      ctx.restore();
+    } else {
+      ctx.strokeStyle = hasHighlight
+        ? `rgba(${hexToRgb(e.color)}, 0.08)`
+        : e.isActive ? `rgba(${hexToRgb(e.color)}, 0.5)` : `rgba(${hexToRgb(e.color)}, 0.2)`;
+      ctx.lineWidth = e.thickness || 1.5;
+      ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (e.label) {
+      const mx = (sx + tx) / 2, my = (sy + ty) / 2;
+      ctx.font = '9px -apple-system, sans-serif';
+      ctx.fillStyle = isHl ? 'rgba(200,220,240,.8)' : 'rgba(200,220,240,.45)';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      ctx.fillText(e.label, mx, my - 3);
+    }
+  }
+
   // Agent↔agent curved edges with arrowheads
   for (const e of topoEdges) {
-    if (e.type === 'contact-line') continue;
+    if (e.type === 'contact-line' || e.type === 'agent-session-line') continue;
     const sx = e.source.x, sy = e.source.y;
     const tx = e.target.x, ty = e.target.y;
     const mx = (sx + tx) / 2, my = (sy + ty) / 2;
@@ -526,6 +625,40 @@ export function renderTopoCanvas() {
         ctx.font = '10px -apple-system, sans-serif';
         ctx.fillStyle = '#cfe3ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
         ctx.fillText(n.label, n.x, n.y - n.r - 4);
+      }
+      ctx.globalAlpha = 1;
+      continue;
+    }
+
+    if (n.type === 'agent-session') {
+      ctx.globalAlpha = isDim ? 0.2 : 1;
+      // Dashed-border diamond shape
+      const dr = n.r;
+      ctx.beginPath();
+      ctx.moveTo(n.x, n.y - dr);
+      ctx.lineTo(n.x + dr, n.y);
+      ctx.lineTo(n.x, n.y + dr);
+      ctx.lineTo(n.x - dr, n.y);
+      ctx.closePath();
+      ctx.fillStyle = isHl ? `rgba(${hexToRgb(n.color)}, 0.4)` : `rgba(${hexToRgb(n.color)}, 0.2)`;
+      ctx.fill();
+      ctx.strokeStyle = isSelected ? '#fff' : isHl ? '#ddd' : isHovered ? '#ccc' : n.stroke;
+      ctx.lineWidth = isSelected ? 2 : isHl ? 1.8 : isHovered ? 1.5 : 1;
+      ctx.setLineDash([3, 2]); ctx.stroke(); ctx.setLineDash([]);
+      // Token count label
+      const tok = n.data && n.data.tokens ? (n.data.tokens.input || 0) + (n.data.tokens.output || 0) : 0;
+      if (tok > 0 && n.r >= 12) {
+        const fs = Math.max(7, Math.min(10, n.r * 0.6));
+        ctx.font = `${fs}px -apple-system, sans-serif`;
+        ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(formatCompactTokens(tok), n.x, n.y);
+      }
+      // Label on hover/select
+      if (isHovered || isSelected || isHl) {
+        ctx.font = '9px -apple-system, sans-serif';
+        ctx.fillStyle = '#cfe3ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+        const lb = n.data && n.data.edgeType ? n.data.edgeType : 'send';
+        ctx.fillText(`${lb}`, n.x, n.y - n.r - 3);
       }
       ctx.globalAlpha = 1;
       continue;
@@ -953,6 +1086,11 @@ export function renderTopoSidePanel() {
     renderSubagentDetail(panel);
     return;
   }
+  // Agent-session nodes — show inter-agent communication detail
+  if (topoSelectedNode.type === 'agent-session') {
+    renderAgentSessionDetail(panel);
+    return;
+  }
   if (topoSidePanelTab === 'agent') {
     renderTopoAgentPanel(panel);
   } else if (topoSidePanelTab === 'contact') {
@@ -1222,6 +1360,125 @@ function renderSubagentDetail(panel) {
   }
 }
 
+function renderAgentSessionDetail(panel) {
+  if (!topoSelectedNode || topoSelectedNode.type !== 'agent-session') {
+    panel.innerHTML = '<div class="mono" style="padding:20px;color:#7aa2d5">点击 Agent 间通信节点查看详情</div>'; return;
+  }
+  const sn = topoNodes.find(n => n.id === topoSelectedNode.id);
+  if (!sn || !sn.data) { panel.innerHTML = '<div class="mono" style="padding:20px">未找到通信记录</div>'; return; }
+  const d = sn.data;
+  const totalTok = d.tokens ? (d.tokens.input || 0) + (d.tokens.output || 0) : 0;
+  const edgeColor = d.edgeType === 'spawn' ? '#9c27b0' : '#3a78ff';
+
+  let html = `<div style="padding:8px 12px">
+    <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:6px">
+      <span class="badge" style="border-color:${edgeColor};color:${edgeColor};font-size:13px;padding:3px 8px">Agent 通信</span>
+      <span class="badge" style="border-color:${d.isActive ? '#4caf50' : '#555'};color:${d.isActive ? '#a5d6a7' : '#888'}">${d.isActive ? 'active' : 'idle'}</span>
+      <span class="badge" style="border-color:${edgeColor};color:${edgeColor}">${escHtml(d.edgeType || 'send')}</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+      <span class="${agentTagClass(d.sourceAgent)}" style="cursor:pointer" onclick="topoSelectAgent('${escHtml(d.sourceAgent)}')">${escHtml(d.sourceAgent)}</span>
+      <span style="color:#7aa2d5;font-size:14px">→</span>
+      <span class="${agentTagClass(d.targetAgent)}" style="cursor:pointer" onclick="topoSelectAgent('${escHtml(d.targetAgent)}')">${escHtml(d.targetAgent)}</span>
+    </div>
+    ${d.tokens ? `<div style="font-size:11px;color:#4caf50;margin-bottom:4px">${formatCompactTokens(totalTok)} tokens</div>` : ''}
+    ${d.messagePreview ? `<div style="font-size:11px;color:#a8b3bf;margin-bottom:4px;line-height:1.4;max-height:60px;overflow:auto;white-space:pre-wrap">${escHtml(d.messagePreview)}</div>` : ''}
+    ${d.status ? `<div style="font-size:10px;color:#6c7883">状态: ${escHtml(d.status)}</div>` : ''}
+    ${d.ts ? `<div style="font-size:10px;color:#6c7883">${fmtTimelineTs(d.ts)}</div>` : ''}
+  </div>`;
+
+  // Action buttons
+  html += `<div class="topo-section" style="display:flex;gap:6px;flex-wrap:wrap;padding:4px 12px">`;
+  if (d.sourceAgent && d.sourceSessionId) {
+    html += `<button class="btn-link" style="font-size:11px" onclick="window.open('/activity?agent=${encodeURIComponent(d.sourceAgent)}&sid=${encodeURIComponent(d.sourceSessionId)}','_blank')">发送方会话</button>`;
+  }
+  if (d.targetAgent && d.targetSessionId) {
+    html += `<button class="btn-link" style="font-size:11px" onclick="window.open('/activity?agent=${encodeURIComponent(d.targetAgent)}&sid=${encodeURIComponent(d.targetSessionId)}','_blank')">接收方会话</button>`;
+  }
+  html += `</div>`;
+
+  // Source session timeline
+  html += `<div style="padding:4px 12px"><div style="font-size:11px;color:#7aa2d5;font-weight:600;margin-bottom:4px">发送方时间轴 (${escHtml(d.sourceAgent)})</div></div>`;
+  html += `<div id="topo-session-timeline" style="margin-top:0;padding:0 12px"><div class="mono" style="padding:12px;color:#7aa2d5;font-size:11px">加载时间轴…</div></div>`;
+
+  // Target session timeline container
+  if (d.targetAgent && d.targetSessionId) {
+    html += `<div style="padding:8px 12px 4px"><div style="font-size:11px;color:#7aa2d5;font-weight:600;margin-bottom:4px">接收方时间轴 (${escHtml(d.targetAgent)})</div></div>`;
+    html += `<div id="topo-target-timeline" style="margin-top:0;padding:0 12px"><div class="mono" style="padding:12px;color:#7aa2d5;font-size:11px">加载时间轴…</div></div>`;
+  }
+
+  panel.innerHTML = html;
+
+  // Load source session timeline
+  if (d.sourceAgent && d.sourceSessionId) {
+    const cacheKey = `${d.sourceAgent}:${d.sourceSessionId}`;
+    const cached = _sessionTimelineCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < 30000) {
+      _renderTimelineInto(cached.items);
+    } else {
+      fetch(`/api/session-history?agent=${encodeURIComponent(d.sourceAgent)}&sid=${encodeURIComponent(d.sourceSessionId)}&limit=200`, { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .then(j => {
+          if (!j || !Array.isArray(j.items)) {
+            const el = document.getElementById('topo-session-timeline');
+            if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#ef5350;font-size:11px">无法加载时间轴数据</div>';
+            return;
+          }
+          _sessionTimelineCache.set(cacheKey, { items: j.items, ts: Date.now() });
+          _renderTimelineInto(j.items);
+        })
+        .catch(() => {
+          const el = document.getElementById('topo-session-timeline');
+          if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#ef5350;font-size:11px">加载失败</div>';
+        });
+    }
+  }
+
+  // Load target session timeline
+  if (d.targetAgent && d.targetSessionId) {
+    const cacheKey = `${d.targetAgent}:${d.targetSessionId}`;
+    const cached = _sessionTimelineCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < 30000) {
+      _renderTargetTimelineInto(cached.items);
+    } else {
+      fetch(`/api/session-history?agent=${encodeURIComponent(d.targetAgent)}&sid=${encodeURIComponent(d.targetSessionId)}&limit=200`, { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .then(j => {
+          if (!j || !Array.isArray(j.items)) {
+            const el = document.getElementById('topo-target-timeline');
+            if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#ef5350;font-size:11px">无法加载</div>';
+            return;
+          }
+          _sessionTimelineCache.set(cacheKey, { items: j.items, ts: Date.now() });
+          _renderTargetTimelineInto(j.items);
+        })
+        .catch(() => {
+          const el = document.getElementById('topo-target-timeline');
+          if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#ef5350;font-size:11px">加载失败</div>';
+        });
+    }
+  }
+}
+
+function _renderTargetTimelineInto(items) {
+  const el = document.getElementById('topo-target-timeline');
+  if (!el) return;
+  if (!items.length) {
+    el.innerHTML = '<div class="mono" style="padding:12px;color:#7aa2d5;font-size:11px">暂无事件</div>';
+    return;
+  }
+  const sorted = [...items].sort((a, b) => {
+    const ta = typeof a.ts === 'number' ? a.ts : new Date(a.ts).getTime();
+    const tb = typeof b.ts === 'number' ? b.ts : new Date(b.ts).getTime();
+    return tb - ta;
+  });
+  let html = `<div style="font-size:11px;color:#6c7883;margin-bottom:6px">${items.length} events</div>`;
+  for (const e of sorted) {
+    html += renderTimelineEvent(e);
+  }
+  el.innerHTML = html;
+}
+
 function renderSessionFullDetail(panel) {
   if (!topologyData || !topoSelectedNode) { panel.innerHTML = '<div class="mono" style="padding:20px;color:#7aa2d5">点击 Session 查看详情</div>'; return; }
   const sNode = topoNodes.find(n => n.id === topoSelectedNode.id);
@@ -1328,10 +1585,46 @@ function _renderTimelineInto(items) {
 }
 
 export function _topoRefreshTimeline() {
-  if (!topoSelectedNode || topoSelectedNode.type !== 'session') return;
+  if (!topoSelectedNode) return;
   const sNode = topoNodes.find(n => n.id === topoSelectedNode.id);
   if (!sNode || !sNode.data) return;
   const d = sNode.data;
+
+  if (topoSelectedNode.type === 'agent-session') {
+    // Refresh source timeline
+    if (d.sourceAgent && d.sourceSessionId) {
+      const cacheKey = `${d.sourceAgent}:${d.sourceSessionId}`;
+      _sessionTimelineCache.delete(cacheKey);
+      const el = document.getElementById('topo-session-timeline');
+      if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#7aa2d5;font-size:11px">加载中…</div>';
+      fetch(`/api/session-history?agent=${encodeURIComponent(d.sourceAgent)}&sid=${encodeURIComponent(d.sourceSessionId)}&limit=200`, { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .then(j => {
+          if (!j || !Array.isArray(j.items)) { if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#ef5350;font-size:11px">无法加载</div>'; return; }
+          _sessionTimelineCache.set(cacheKey, { items: j.items, ts: Date.now() });
+          _renderTimelineInto(j.items);
+        })
+        .catch(() => { if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#ef5350;font-size:11px">加载失败</div>'; });
+    }
+    // Refresh target timeline
+    if (d.targetAgent && d.targetSessionId) {
+      const cacheKey = `${d.targetAgent}:${d.targetSessionId}`;
+      _sessionTimelineCache.delete(cacheKey);
+      const el = document.getElementById('topo-target-timeline');
+      if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#7aa2d5;font-size:11px">加载中…</div>';
+      fetch(`/api/session-history?agent=${encodeURIComponent(d.targetAgent)}&sid=${encodeURIComponent(d.targetSessionId)}&limit=200`, { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .then(j => {
+          if (!j || !Array.isArray(j.items)) { if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#ef5350;font-size:11px">无法加载</div>'; return; }
+          _sessionTimelineCache.set(cacheKey, { items: j.items, ts: Date.now() });
+          _renderTargetTimelineInto(j.items);
+        })
+        .catch(() => { if (el) el.innerHTML = '<div class="mono" style="padding:12px;color:#ef5350;font-size:11px">加载失败</div>'; });
+    }
+    return;
+  }
+
+  if (topoSelectedNode.type !== 'session' && topoSelectedNode.type !== 'subagent') return;
   if (!d.agentId || !d.id) return;
   const cacheKey = `${d.agentId}:${d.id}`;
   _sessionTimelineCache.delete(cacheKey);

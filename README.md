@@ -104,3 +104,9 @@ Edit `heartbeat_schedule.json` to set per-time-window heartbeat intervals:
 ```
 
 Changes take effect within 1 minute (no restart needed).
+
+
+杀掉4000端口进程
+```bash
+lsof -ti:4000 | xargs kill
+```
