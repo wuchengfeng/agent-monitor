@@ -1737,12 +1737,11 @@ export function topoSelectContact(contactId) {
 }
 
 export function toggleTopologyView() {
-  setTopologyViewActive(!topologyViewActive);
-  if (topologyViewActive) { setChannelViewActive(false); const cb = document.getElementById('btn-channel-view'); if (cb) cb.textContent = '频道视图'; }
-  updateTopoToggleBtn();
-  if (topologyViewActive) { startTopoLoop(); pollTopology(); }
-  else { stopTopoLoop(); }
-  // import render dynamically to avoid circular dependency at module evaluation
+  setTopologyViewActive(true);
+  setChannelViewActive(false);
+  const cb = document.getElementById('btn-channel-view');
+  if (cb) cb.textContent = '频道视图';
+  startTopoLoop(); pollTopology();
   import('./render.js').then(m => m.render());
 }
 

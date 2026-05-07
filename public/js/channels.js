@@ -4,7 +4,7 @@ import {
   systemChannelsExpanded, setSystemChannelsExpanded, topologyViewActive, setTopologyViewActive,
 } from './state.js';
 import { escHtml, fmtTs, fmtCompact, makeKey, channelIcon, isSystemChannel, agentTagClass } from './utils.js';
-import { updateTopoToggleBtn, stopTopoLoop } from './topology.js';
+import { stopTopoLoop, startTopoLoop, pollTopology } from './topology.js';
 
 export async function loadNicknames() {
   try {
@@ -69,9 +69,10 @@ export async function pollChannels() {
 
 export function toggleChannelView() {
   setChannelViewActive(!channelViewActive);
-  if (channelViewActive) { setTopologyViewActive(false); updateTopoToggleBtn(); stopTopoLoop(); }
+  if (channelViewActive) { setTopologyViewActive(false); stopTopoLoop(); }
+  else { setTopologyViewActive(true); startTopoLoop(); pollTopology(); }
   const btn = document.getElementById('btn-channel-view');
-  if (btn) btn.textContent = channelViewActive ? '会话视图' : '频道视图';
+  if (btn) btn.textContent = channelViewActive ? '拓扑视图' : '频道视图';
   import('./render.js').then(m => m.render());
 }
 

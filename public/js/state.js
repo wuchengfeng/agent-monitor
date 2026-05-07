@@ -36,7 +36,7 @@ export let llmCaptureDetailExpanded = new Set();
 export function setLlmCaptureDetailExpanded(v) { llmCaptureDetailExpanded = v; }
 
 // --- Topology View state ---
-export let topologyViewActive = false;
+export let topologyViewActive = true;
 export function setTopologyViewActive(v) { topologyViewActive = v; }
 export let topologyData = null;
 export function setTopologyData(v) { topologyData = v; }

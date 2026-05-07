@@ -46,8 +46,11 @@ window.addEventListener('DOMContentLoaded', () => {
   const urlParams = new URLSearchParams(location.search);
   const startView = urlParams.get('view');
   if (startView === 'channel') { toggleChannelView(); }
-  else if (startView === 'topology') { toggleTopologyView(); }
   if (startView) history.replaceState(null, '', '/');
+
+  // Topology is always-on by default — start polling immediately
+  startTopoLoop();
+  pollTopology();
 
   pollSnapshot();
   setInterval(pollSnapshot, 15000);
