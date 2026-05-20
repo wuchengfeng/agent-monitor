@@ -60,7 +60,7 @@ export async function pollTopology() {
 
 export function computeTopologyLayout() {
   if (!topologyData) return;
-  const { agents, contacts, contactEdges, agentEdges, agentEdgeSessions, subagents, systemSummary } = topologyData;
+  const { agents, contacts, contactEdges, agentEdges, agentEdgeSessions, subagents, systemSummary, errors } = topologyData;
   const canvas = document.getElementById('topo-canvas');
   if (!canvas) return;
   const W = canvas.width / (window.devicePixelRatio || 1);
@@ -146,19 +146,57 @@ export function computeTopologyLayout() {
     nodeMap.set(sysNode.id, sysNode);
   }
 
+  // Error cluster node
+  const errorList = errors || [];
+  if (errorList.length > 0) {
+    const errNode = {
+      id: 'error:cluster', type: 'error',
+      x: W * 0.15, y: H - 40,
+      r: 18, color: '#4a1515', stroke: '#f44336', textColor: '#ef9a9a',
+      label: `错误 (${errorList.length})`, data: { errors: errorList }, column: 'error',
+    };
+    nodes.push(errNode);
+    nodeMap.set(errNode.id, errNode);
+  }
+
   // Subagent nodes — placed near their parent session (or parent agent as fallback)
   const subagentList = [];
   // Defer placement until after session nodes exist — collect first
   const pendingSubagents = [];
+  const TRASH_THRESHOLD_MS = 30 * 60 * 1000;
+  const nowTs = Date.now();
+  const trashByAgent = new Map(); // agentId -> staleSubs[]
   if (subagents) {
     for (const [aid, subs] of Object.entries(subagents)) {
       const parentAgent = nodeMap.get(`agent:${aid}`);
       if (!parentAgent) continue;
       const visibleSubs = subs.filter(sessionVisible);
       for (const sub of visibleSubs) {
-        pendingSubagents.push({ sub, aid, parentAgent });
+        const isStale = !sub.isActive && (!sub.lastActiveTs || (nowTs - sub.lastActiveTs > TRASH_THRESHOLD_MS));
+        if (isStale) {
+          if (!trashByAgent.has(aid)) trashByAgent.set(aid, []);
+          trashByAgent.get(aid).push(sub);
+        } else {
+          pendingSubagents.push({ sub, aid, parentAgent });
+        }
       }
     }
+  }
+  // Create per-agent trash bin nodes for stale subagents
+  for (const [aid, staleSubs] of trashByAgent) {
+    const parentAgent = nodeMap.get(`agent:${aid}`);
+    if (!parentAgent) continue;
+    const trashNode = {
+      id: `trash:${aid}`, type: 'trash',
+      x: parentAgent.x + 80, y: parentAgent.y + parentAgent.r + 50,
+      r: 16, color: '#1a1a2a', stroke: '#6a1b9a', textColor: '#888',
+      label: `回收站 (${staleSubs.length})`,
+      data: { agentId: aid, staleSubs },
+      parentAgentId: `agent:${aid}`,
+      column: 'trash',
+    };
+    nodes.push(trashNode);
+    nodeMap.set(trashNode.id, trashNode);
   }
 
   // Vertical overlap prevention within columns
@@ -257,7 +295,7 @@ export function computeTopologyLayout() {
   }
 
   // Session + subagent overlap prevention
-  const sessionNodes = nodes.filter(n => n.type === 'session' || n.type === 'subagent');
+  const sessionNodes = nodes.filter(n => n.type === 'session' || n.type === 'subagent' || n.type === 'trash');
   for (let iter = 0; iter < 50; iter++) {
     for (let i = 0; i < sessionNodes.length; i++) {
       if (topoSavedPositions[sessionNodes[i].id]) continue;
@@ -380,7 +418,7 @@ export function computeTopologyLayout() {
           id: `agent-session:${aes.id}`, type: 'agent-session',
           x, y, r,
           color, stroke: aes.isActive ? color : '#444', textColor: '#a8b3bf',
-          label: topoDisplayName(`agent-session:${aes.id}`, aes.messagePreview ? aes.messagePreview.slice(0, 20) : `${srcAgentId}→${tgtAgentId}`),
+          label: topoDisplayName(`agent-session:${aes.id}`, aes.messagePreview ? aes.messagePreview.slice(0, 20) : `${srcAgentId}→${tgtAgentId}`) + (aes.messageCount > 1 ? ` (${aes.messageCount})` : ''),
           data: aes,
           sourceAgentNodeId: `agent:${srcAgentId}`,
           targetAgentNodeId: `agent:${tgtAgentId}`,
@@ -413,6 +451,34 @@ export function computeTopologyLayout() {
       type: 'subagent', color: '#9c27b0', thickness: 1.5,
       label: 'spawn', isActive: sn.data && sn.data.isActive, dashed: true, data: sn.data,
     });
+  }
+
+  // Trash bin edges: agent → trash node
+  for (const n of nodes) {
+    if (n.type !== 'trash') continue;
+    const parentNode = nodeMap.get(n.parentAgentId);
+    if (!parentNode) continue;
+    layoutEdges.push({
+      source: parentNode, target: n,
+      type: 'trash-link', color: '#6a1b9a', thickness: 1,
+      label: '', isActive: false, dashed: true, data: n.data,
+    });
+  }
+
+  // Error edges: error node → session nodes that have errors
+  const errNode = nodeMap.get('error:cluster');
+  if (errNode && errorList.length > 0) {
+    const errorSessionIds = new Set(errorList.map(e => e.sessionId));
+    for (const sid of errorSessionIds) {
+      const sessionNode = nodeMap.get(`session:${sid}`);
+      if (sessionNode) {
+        layoutEdges.push({
+          source: errNode, target: sessionNode,
+          type: 'error-link', color: '#f44336', thickness: 1,
+          label: '', isActive: false, dashed: true, data: null,
+        });
+      }
+    }
   }
 
   setTopoNodes(nodes);
@@ -464,6 +530,7 @@ export function renderTopoCanvas() {
           if (n.contactNodeId) hlNodes.add(n.contactNodeId);
         }
         if (n.type === 'subagent' && n.parentAgentId === sel.id) hlNodes.add(n.id);
+        if (n.type === 'trash' && n.parentAgentId === sel.id) hlNodes.add(n.id);
       }
     } else if (sel.type === 'subagent') {
       hlNodes.add(sel.id);
@@ -478,6 +545,15 @@ export function renderTopoCanvas() {
       if (sn) {
         if (sn.sourceAgentNodeId) hlNodes.add(sn.sourceAgentNodeId);
         if (sn.targetAgentNodeId) hlNodes.add(sn.targetAgentNodeId);
+      }
+    } else if (sel.type === 'error') {
+      hlNodes.add(sel.id);
+      const errData = sel.data || (topoNodes.find(n => n.id === sel.id) || {}).data;
+      if (errData && errData.errors) {
+        const errSids = new Set(errData.errors.map(e => e.sessionId));
+        for (const n of topoNodes) {
+          if (n.type === 'session' && errSids.has(n.data && n.data.id || n.id.replace('session:', ''))) hlNodes.add(n.id);
+        }
       }
     }
     for (const e of topoEdges) {
@@ -678,6 +754,59 @@ export function renderTopoCanvas() {
       continue;
     }
 
+    if (n.type === 'error') {
+      ctx.globalAlpha = isDim ? 0.2 : 1;
+      // Red triangle (warning)
+      const er = n.r;
+      ctx.beginPath();
+      ctx.moveTo(n.x, n.y - er);
+      ctx.lineTo(n.x + er * 0.95, n.y + er * 0.7);
+      ctx.lineTo(n.x - er * 0.95, n.y + er * 0.7);
+      ctx.closePath();
+      ctx.fillStyle = isHl ? 'rgba(244,67,54,0.35)' : 'rgba(244,67,54,0.18)';
+      ctx.fill();
+      ctx.strokeStyle = isSelected ? '#fff' : isHovered ? '#ef9a9a' : n.stroke;
+      ctx.lineWidth = isSelected ? 2 : 1.5;
+      ctx.stroke();
+      ctx.font = 'bold 12px -apple-system, sans-serif';
+      ctx.fillStyle = n.textColor; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('!', n.x, n.y + 2);
+      ctx.font = '9px -apple-system, sans-serif';
+      ctx.fillStyle = '#ef9a9a'; ctx.textBaseline = 'top';
+      ctx.fillText(n.label, n.x, n.y + er * 0.7 + 6);
+      ctx.globalAlpha = 1;
+      continue;
+    }
+
+    if (n.type === 'trash') {
+      ctx.globalAlpha = isDim ? 0.2 : 1;
+      const tw = 30, th = 24, trx = 5;
+      ctx.beginPath();
+      ctx.moveTo(n.x - tw/2 + trx, n.y - th/2);
+      ctx.lineTo(n.x + tw/2 - trx, n.y - th/2);
+      ctx.quadraticCurveTo(n.x + tw/2, n.y - th/2, n.x + tw/2, n.y - th/2 + trx);
+      ctx.lineTo(n.x + tw/2, n.y + th/2 - trx);
+      ctx.quadraticCurveTo(n.x + tw/2, n.y + th/2, n.x + tw/2 - trx, n.y + th/2);
+      ctx.lineTo(n.x - tw/2 + trx, n.y + th/2);
+      ctx.quadraticCurveTo(n.x - tw/2, n.y + th/2, n.x - tw/2, n.y + th/2 - trx);
+      ctx.lineTo(n.x - tw/2, n.y - th/2 + trx);
+      ctx.quadraticCurveTo(n.x - tw/2, n.y - th/2, n.x - tw/2 + trx, n.y - th/2);
+      ctx.closePath();
+      ctx.fillStyle = isHl ? 'rgba(106,27,154,0.25)' : '#1a1a2a';
+      ctx.fill();
+      ctx.strokeStyle = isSelected ? '#fff' : isHovered ? '#ce93d8' : n.stroke;
+      ctx.lineWidth = isSelected ? 2 : 1;
+      ctx.setLineDash([3, 2]); ctx.stroke(); ctx.setLineDash([]);
+      ctx.font = '12px -apple-system, sans-serif';
+      ctx.fillStyle = n.textColor; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('\u{1F5D1}', n.x, n.y);
+      ctx.font = '9px -apple-system, sans-serif';
+      ctx.fillStyle = '#666'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText(n.label, n.x, n.y + th/2 + 4);
+      ctx.globalAlpha = 1;
+      continue;
+    }
+
     if (n.type === 'subagent') {
       if (isHl && !isSelected) {
         ctx.save(); ctx.shadowColor = '#9c27b0'; ctx.shadowBlur = 14;
@@ -828,6 +957,12 @@ export function topoHitTest(mx, my) {
     if (n.type === 'contact' && n.contactType === 'group') {
       const w = n._boxW || n.r * 2.4, h = n._boxH || n.r * 1.6;
       if (x >= n.x - w/2 - 4 && x <= n.x + w/2 + 4 && y >= n.y - h/2 - 4 && y <= n.y + h/2 + 4) return n;
+    } else if (n.type === 'trash') {
+      const tw = 30, th = 24;
+      if (x >= n.x - tw/2 - 4 && x <= n.x + tw/2 + 4 && y >= n.y - th/2 - 4 && y <= n.y + th/2 + 4) return n;
+    } else if (n.type === 'error') {
+      const dx = x - n.x, dy = y - n.y;
+      if (dx * dx + dy * dy <= (n.r + 6) * (n.r + 6)) return n;
     } else {
       const dx = x - n.x, dy = y - n.y;
       if (dx * dx + dy * dy <= (n.r + 4) * (n.r + 4)) return n;
@@ -1048,6 +1183,8 @@ export function renderTopologyView() {
             <div class="topo-legend-row"><div class="topo-legend-line" style="background:#3a78ff"></div> yach</div>
             <div class="topo-legend-row"><div class="topo-legend-line" style="background:#4a6fa5"></div> feishu</div>
             <div class="topo-legend-row"><div class="topo-legend-line" style="background:#9c27b0;border-style:dashed"></div> spawn/send</div>
+            <div class="topo-legend-row"><div style="width:14px;height:11px;border-radius:3px;background:#1a1a2a;border:1px dashed #6a1b9a"></div> 回收站</div>
+            <div class="topo-legend-row"><div style="width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-bottom:12px solid rgba(244,67,54,.4)"></div> 错误</div>
           </div>
         </div>
         <div id="topo-side">
@@ -1089,6 +1226,16 @@ export function renderTopoSidePanel() {
   // Agent-session nodes — show inter-agent communication detail
   if (topoSelectedNode.type === 'agent-session') {
     renderAgentSessionDetail(panel);
+    return;
+  }
+  // Trash bin nodes — show archived subagent list
+  if (topoSelectedNode.type === 'trash') {
+    renderTrashBinDetail(panel);
+    return;
+  }
+  // Error cluster node — show error list
+  if (topoSelectedNode.type === 'error') {
+    renderErrorNodeDetail(panel);
     return;
   }
   if (topoSidePanelTab === 'agent') {
@@ -1301,6 +1448,85 @@ function renderTimelineEvent(e) {
   </div>`;
 }
 
+function renderErrorNodeDetail(panel) {
+  const sn = topoNodes.find(n => n.id === 'error:cluster');
+  if (!sn || !sn.data || !sn.data.errors || sn.data.errors.length === 0) {
+    panel.innerHTML = '<div class="mono" style="padding:20px;color:#ef9a9a">暂无错误</div>'; return;
+  }
+  const errs = sn.data.errors;
+  const byAgent = {};
+  for (const e of errs) {
+    byAgent[e.agentId] = (byAgent[e.agentId] || 0) + 1;
+  }
+
+  let html = `<div style="padding:8px 12px">
+    <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:6px">
+      <span class="badge" style="border-color:#f44336;color:#ef9a9a;font-size:13px;padding:3px 8px">! 错误汇总</span>
+      <span class="badge" style="border-color:#f44336;color:#ef9a9a">${errs.length}</span>
+    </div>
+    <div style="font-size:11px;color:#a8b3bf;margin-bottom:6px">按 Agent 分布:</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+      ${Object.entries(byAgent).map(([aid, cnt]) => `<span class="${agentTagClass(aid)}">${escHtml(aid)} (${cnt})</span>`).join('')}
+    </div>
+  </div>`;
+
+  html += `<div style="padding:4px 12px;border-top:1px solid #2a2a3a;max-height:400px;overflow-y:auto">`;
+  for (const err of errs) {
+    const timeStr = err.ts ? new Date(err.ts).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', month: '2-digit', day: '2-digit' }) : '?';
+    html += `<div style="display:flex;align-items:flex-start;gap:6px;padding:5px 4px;border-bottom:1px solid #1a1a2a;cursor:pointer" onclick="topoSelectErrorSession('${escHtml(err.agentId)}','${escHtml(err.sessionId)}')">
+      <div style="width:6px;height:6px;border-radius:50%;background:#f44336;flex-shrink:0;margin-top:4px"></div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:11px;color:#ef9a9a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml((err.message || '').slice(0, 80))}</div>
+        <div style="font-size:10px;color:#6c7883;margin-top:2px">
+          <span class="${agentTagClass(err.agentId)}" style="font-size:9px;padding:1px 4px">${escHtml(err.agentId)}</span>
+          ${err.toolName ? `<span style="color:#ce9178;margin-left:4px">${escHtml(err.toolName)}</span>` : ''}
+          <span style="margin-left:4px">${timeStr}</span>
+        </div>
+      </div>
+    </div>`;
+  }
+  html += `</div>`;
+  panel.innerHTML = html;
+}
+
+export function topoSelectErrorSession(agentId, sessionId) {
+  window.open(`/activity?agent=${encodeURIComponent(agentId)}&sid=${encodeURIComponent(sessionId)}`, '_blank');
+}
+
+function renderTrashBinDetail(panel) {
+  const sn = topoNodes.find(n => n.id === topoSelectedNode.id);
+  if (!sn || !sn.data) { panel.innerHTML = '<div class="mono" style="padding:20px">未找到回收站</div>'; return; }
+  const { agentId, staleSubs } = sn.data;
+  const totalTokens = staleSubs.reduce((sum, s) => sum + (s.tokens ? (s.tokens.input || 0) + (s.tokens.output || 0) : 0), 0);
+
+  let html = `<div style="padding:8px 12px">
+    <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:6px">
+      <span class="badge" style="border-color:#6a1b9a;color:#ce93d8;font-size:13px;padding:3px 8px">\u{1F5D1} 回收站</span>
+      <span class="${agentTagClass(agentId)}" style="font-size:11px">${escHtml(agentId)}</span>
+    </div>
+    <div style="font-size:12px;color:#a8b3bf;margin-bottom:8px">已完成超过 30 分钟的子代理 (${staleSubs.length})</div>
+    <div style="font-size:11px;color:#4caf50">${formatCompactTokens(totalTokens)} tokens</div>
+  </div>`;
+
+  html += `<div style="padding:4px 12px;border-top:1px solid #2a2a3a">`;
+  for (const sub of staleSubs) {
+    const tok = sub.tokens ? (sub.tokens.input || 0) + (sub.tokens.output || 0) : 0;
+    const age = sub.lastActiveTs ? Math.round((Date.now() - sub.lastActiveTs) / 60000) : '?';
+    html += `<div style="display:flex;align-items:center;gap:6px;padding:5px 4px;border-bottom:1px solid #1a1a2a;cursor:pointer" onclick="topoSelectTrashSubagent('${escHtml(agentId)}','${escHtml(sub.id)}')">
+      <div style="width:6px;height:6px;border-radius:50%;background:#555;flex-shrink:0"></div>
+      <span style="color:#e1bee7;font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(sub.label || sub.id.slice(0, 8))}</span>
+      <span style="color:#6c7883;font-size:10px;flex-shrink:0">${age}m</span>
+      <span style="color:#4caf50;font-size:10px;flex-shrink:0">${formatCompactTokens(tok)}</span>
+    </div>`;
+  }
+  html += `</div>`;
+  panel.innerHTML = html;
+}
+
+export function topoSelectTrashSubagent(agentId, sessionId) {
+  window.open(`/activity?agent=${encodeURIComponent(agentId)}&sid=${encodeURIComponent(sessionId)}`, '_blank');
+}
+
 function renderSubagentDetail(panel) {
   if (!topoSelectedNode || topoSelectedNode.type !== 'subagent') {
     panel.innerHTML = '<div class="mono" style="padding:20px;color:#7aa2d5">点击 Subagent 查看详情</div>'; return;
@@ -1375,6 +1601,7 @@ function renderAgentSessionDetail(panel) {
       <span class="badge" style="border-color:${edgeColor};color:${edgeColor};font-size:13px;padding:3px 8px">Agent 通信</span>
       <span class="badge" style="border-color:${d.isActive ? '#4caf50' : '#555'};color:${d.isActive ? '#a5d6a7' : '#888'}">${d.isActive ? 'active' : 'idle'}</span>
       <span class="badge" style="border-color:${edgeColor};color:${edgeColor}">${escHtml(d.edgeType || 'send')}</span>
+      ${d.messageCount > 1 ? `<span class="badge" style="border-color:#ff9800;color:#ffb74d">${d.messageCount} 条消息</span>` : ''}
     </div>
     <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
       <span class="${agentTagClass(d.sourceAgent)}" style="cursor:pointer" onclick="topoSelectAgent('${escHtml(d.sourceAgent)}')">${escHtml(d.sourceAgent)}</span>

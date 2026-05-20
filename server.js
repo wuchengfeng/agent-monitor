@@ -558,6 +558,7 @@ function buildTopology() {
   const _targetSessionsCache = new Map(); // agentId -> sessions.json object (cached for perf)
   const systemCounts = { heartbeat: 0, 'openai-api': 0, webchat: 0, unknown: 0 };
   const subagentSessions = new Map(); // agentId -> [{id, key, isActive, tokens, label, parentSessionId}]
+  const collectedErrors = []; // [{sessionId, agentId, message, ts, toolName}]
 
   for (const agentId of agentIds) {
     const dir = getAgentSessionsDir(agentId);
@@ -583,6 +584,9 @@ function buildTopology() {
       agentTotalInput += tokens.input;
       agentTotalOutput += tokens.output;
       if (isActive) activeSessions.push(sessionId);
+      if (cached && cached.errors && cached.errors.length > 0) {
+        for (const err of cached.errors) collectedErrors.push(err);
+      }
 
       const keyParts = sessionKey.split(':');
       const channel = dc.channel || origin.surface || origin.provider || keyParts[2] || 'unknown';
@@ -688,7 +692,7 @@ function buildTopology() {
       status: activeSessions.length > 0 ? 'active' : 'idle',
     });
 
-    // Scan active JSONL files for inter-agent edges (sessions_send/sessions_spawn)
+    // Scan active JSONL files for inter-agent edges (sessions_send/sessions_spawn) and errors
     // pendingSends tracks send calls before their result arrives in the same session
     const pendingSends = new Map(); // `${sid}:${targetAgent}` -> interaction object
     for (const sid of activeSessions) {
@@ -696,8 +700,16 @@ function buildTopology() {
       try {
         const data = fs.readFileSync(fp, 'utf8');
         const lines = data.split('\n');
+        const activeErrors = [];
         for (const line of lines) {
           if (!line) continue;
+          // Collect errors from active sessions
+          if (line.includes('error') || line.includes('Error')) {
+            const errEv = parseLine(line, sid, agentId);
+            if (errEv && (errEv.errorMessage || errEv.isError)) {
+              activeErrors.push({ sessionId: sid, agentId, message: errEv.errorMessage || 'Tool error', ts: errEv.ts, toolName: errEv.toolName || null });
+            }
+          }
           if (!line.includes('sessions_send') && !line.includes('sessions_spawn') && !line.includes('provenance')) continue;
           const ev = parseLine(line, sid, agentId);
           if (!ev) continue;
@@ -773,6 +785,7 @@ function buildTopology() {
             });
           }
         }
+        for (const err of activeErrors) collectedErrors.push(err);
       } catch {}
     }
   }
@@ -781,8 +794,20 @@ function buildTopology() {
   const subagents = {};
   for (const [aid, subs] of subagentSessions) subagents[aid] = subs;
 
-  // Build agentEdgeSessions from collected interactions
-  const agentEdgeSessions = agentEdgeInteractions.map((inter, idx) => {
+  // Deduplicate agentEdgeInteractions by sourceSessionId + targetAgent
+  const dedupedInteractions = new Map();
+  for (const inter of agentEdgeInteractions) {
+    const key = `${inter.sourceSessionId}:${inter.targetAgent}:${inter.edgeType}`;
+    const existing = dedupedInteractions.get(key);
+    if (!existing || (inter.ts && (!existing.ts || inter.ts > existing.ts))) {
+      dedupedInteractions.set(key, { ...inter, messageCount: (existing ? existing.messageCount : 0) + 1 });
+    } else if (existing) {
+      existing.messageCount = (existing.messageCount || 1) + 1;
+    }
+  }
+
+  // Build agentEdgeSessions from deduplicated interactions
+  const agentEdgeSessions = [...dedupedInteractions.values()].map((inter, idx) => {
     let tokens = { input: 0, output: 0 };
     let isActive = false;
     let lastActiveTs = null;
@@ -804,6 +829,7 @@ function buildTopology() {
       targetSessionId: inter.targetSessionId,
       targetSessionKey: inter.targetSessionKey,
       messagePreview: inter.messagePreview,
+      messageCount: inter.messageCount || 1,
       ts: inter.ts,
       status: inter.status,
       tokens,
@@ -812,6 +838,10 @@ function buildTopology() {
     };
   });
 
+  // Sort errors by time desc and keep most recent 50
+  collectedErrors.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  const errors = collectedErrors.slice(0, 50);
+
   topologyCache = {
     agents,
     contacts: [...contactMap.values()],
@@ -819,6 +849,7 @@ function buildTopology() {
     agentEdges: [...agentEdgeDedup.values()],
     agentEdgeSessions,
     subagents,
+    errors,
     systemSummary: systemCounts,
     version: topologyCache.version + 1,
     builtAt: now,
@@ -875,17 +906,21 @@ function collectSnapshot(maxLinesPerFile = 30) {
                 const sessionId = path.basename(fp, '.jsonl');
                 let totalInput = 0;
                 let totalOutput = 0;
+                const fileErrors = [];
                 for (const line of allLines) {
                   const ev = parseLine(line, sessionId, agentId);
                   if (ev && ev.usage) {
                     totalInput += (ev.usage.input || 0);
                     totalOutput += (ev.usage.output || 0);
                   }
+                  if (ev && (ev.errorMessage || ev.isError)) {
+                    fileErrors.push({ sessionId, agentId, message: ev.errorMessage || 'Tool error', ts: ev.ts, toolName: ev.toolName || null });
+                  }
                 }
                 outStats[agentId][sessionId] = { input: totalInput, output: totalOutput };
                 const tailLines = allLines.slice(-maxLinesPerFile);
                 const tailEvents = tailLines.map(l => parseLine(l, sessionId, agentId)).filter(Boolean);
-                statsCache.set(fp, { size: fileSize, input: totalInput, output: totalOutput, tail: tailEvents });
+                statsCache.set(fp, { size: fileSize, input: totalInput, output: totalOutput, tail: tailEvents, errors: fileErrors.slice(-20) });
                 for (const ev of tailEvents) outItems.push(ev);
               }
               if (--pendingFiles === 0) {
